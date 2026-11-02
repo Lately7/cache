@@ -15,6 +15,12 @@ nút **Xuất JSON**.
 được, không phải giờ gửi gốc. Bong bóng trên cùng màn hình chỉ được lưu khi cuộn lên thấy tin
 phía trước nó.
 
+Avatar lấy từ ảnh trong thông báo, hoặc cắt từ màn hình khi thấy avatar trong đoạn chat. Ảnh chụp
+màn hình chỉ dùng để cắt avatar rồi bỏ, không lưu lại. Chưa có avatar thì hiện chữ cái đầu.
+
+Khi cập nhật từ bản 0.1, dữ liệu cũ được giữ và tự làm sạch. Nếu avatar không hiện, tắt rồi bật
+lại Trợ năng để app nhận quyền chụp màn hình.
+
 ## Cài trên iQOO Z10 Turbo Pro
 
 1. Chép `app-debug.apk` sang điện thoại và mở để cài (cho phép cài từ nguồn này).

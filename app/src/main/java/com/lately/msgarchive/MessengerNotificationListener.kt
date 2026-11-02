@@ -2,6 +2,7 @@ package com.lately.msgarchive
 
 import android.app.Notification
 import android.app.Person
+import android.graphics.drawable.Icon
 import android.os.Build
 import android.os.Bundle
 import android.os.Parcelable
@@ -23,6 +24,8 @@ class MessengerNotificationListener : NotificationListenerService() {
             ?: extras.getCharSequence(Notification.EXTRA_TITLE)?.toString()
             ?: return
 
+        saveAvatar(conversation, notification.getLargeIcon())
+
         val store = MessageStore.get(this)
         if (styled.isNullOrEmpty()) {
             val text = extras.getCharSequence(Notification.EXTRA_TEXT)?.toString() ?: return
@@ -33,11 +36,23 @@ class MessengerNotificationListener : NotificationListenerService() {
             val bundle = item as? Bundle ?: continue
             val text = bundle.getCharSequence("text")?.toString() ?: continue
             val time = bundle.getLong("time", sbn.postTime)
-            val sender = bundle.getCharSequence("sender")?.toString()
-                ?: bundle.getPersonCompat("sender_person")?.name?.toString()
+            val person = bundle.getPersonCompat("sender_person")
+            val sender = bundle.getCharSequence("sender")?.toString() ?: person?.name?.toString()
+            if (sender != null) saveAvatar(sender, person?.icon)
             // MessagingStyle leaves the sender empty for the device owner's own replies.
             save(store, conversation, sender, sender == null, text, time)
         }
+    }
+
+    private fun saveAvatar(name: String, icon: Icon?) {
+        if (icon == null || AvatarStore.has(this, name)) return
+        // The icon can point at Messenger's private files; an unreadable one just means no avatar yet.
+        val drawable = try {
+            icon.loadDrawable(this)
+        } catch (_: SecurityException) {
+            null
+        } ?: return
+        AvatarStore.saveDrawable(this, name, drawable)
     }
 
     private fun save(

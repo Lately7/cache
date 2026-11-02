@@ -17,10 +17,17 @@ data class Message(
     val source: String,
 )
 
-data class Conversation(val name: String, val count: Int, val lastAt: Long, val lastBody: String)
+data class Conversation(
+    val name: String,
+    val count: Int,
+    val lastAt: Long,
+    val lastBody: String,
+    val lastOutgoing: Boolean,
+    val peer: String?,
+)
 
 class MessageStore private constructor(context: Context) :
-    SQLiteOpenHelper(context, "archive.db", null, 1) {
+    SQLiteOpenHelper(context, "archive.db", null, 2) {
 
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL(
@@ -37,7 +44,42 @@ class MessageStore private constructor(context: Context) :
         db.execSQL("CREATE INDEX idx_conv_ts ON messages(conversation, ts)")
     }
 
-    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) = Unit
+    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+        if (oldVersion < 2) cleanScreenRows(db)
+    }
+
+    /** Version 1 stored raw accessibility labels; reparse them so existing chats are kept, not lost. */
+    private fun cleanScreenRows(db: SQLiteDatabase) {
+        val previous = HashMap<String, String>()
+        db.rawQuery(
+            "SELECT id, conversation, outgoing, body FROM messages WHERE source='screen' ORDER BY conversation, ts, id",
+            null,
+        ).use { c ->
+            while (c.moveToNext()) {
+                val id = arrayOf(c.getLong(0).toString())
+                val conversation = ChatParser.cleanTitle(c.getString(1))
+                val outgoing = c.getInt(2) == 1
+                val body = c.getString(3)
+                if (ChatParser.isNoise(body)) {
+                    db.delete("messages", "id=?", id)
+                    continue
+                }
+                val marked = ChatParser.parseMarked(body)
+                val text = marked?.text ?: body
+                val sender = if (outgoing) null else marked?.sender ?: conversation
+                val message = ScreenMessage(text, outgoing, previous[conversation].orEmpty(), sender)
+                val values = ContentValues().apply {
+                    put("conversation", conversation)
+                    put("sender", sender)
+                    put("body", text)
+                    put("dedupe_key", ChatParser.screenKey(conversation, message))
+                }
+                val updated = db.updateWithOnConflict("messages", values, "id=?", id, SQLiteDatabase.CONFLICT_IGNORE)
+                if (updated == 0) db.delete("messages", "id=?", id)
+                previous[conversation] = text
+            }
+        }
+    }
 
     fun insert(message: Message, key: String): Boolean {
         val values = ContentValues().apply {
@@ -64,11 +106,25 @@ class MessageStore private constructor(context: Context) :
     fun conversations(): List<Conversation> {
         // SQLite returns the row holding MAX(ts) for the bare body column.
         readableDatabase.rawQuery(
-            "SELECT conversation, COUNT(*), MAX(ts), body FROM messages GROUP BY conversation ORDER BY MAX(ts) DESC",
+            """SELECT conversation, COUNT(*), MAX(ts), body, outgoing,
+                (SELECT sender FROM messages p WHERE p.conversation=m.conversation AND p.outgoing=0
+                 ORDER BY p.ts DESC LIMIT 1)
+               FROM messages m GROUP BY conversation ORDER BY MAX(ts) DESC""",
             null,
         ).use { c ->
             val out = ArrayList<Conversation>(c.count)
-            while (c.moveToNext()) out.add(Conversation(c.getString(0), c.getInt(1), c.getLong(2), c.getString(3)))
+            while (c.moveToNext()) {
+                out.add(
+                    Conversation(
+                        c.getString(0),
+                        c.getInt(1),
+                        c.getLong(2),
+                        c.getString(3),
+                        c.getInt(4) == 1,
+                        if (c.isNull(5)) null else c.getString(5),
+                    ),
+                )
+            }
             return out
         }
     }

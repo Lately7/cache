@@ -1,14 +1,18 @@
 package com.lately.msgarchive
 
 import android.accessibilityservice.AccessibilityService
+import android.graphics.Bitmap
 import android.graphics.Rect
 import android.os.Handler
 import android.os.Looper
+import android.view.Display
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import java.util.concurrent.Executors
 
 class MessengerAccessibilityService : AccessibilityService() {
     private val handler = Handler(Looper.getMainLooper())
+    private val executor = Executors.newSingleThreadExecutor()
     private val scan = Runnable { scanWindow() }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent) {
@@ -41,7 +45,7 @@ class MessengerAccessibilityService : AccessibilityService() {
             if (!item.outgoing && store.seenInNotification(chat.conversation, item.text, now)) continue
             val message = Message(
                 chat.conversation,
-                if (item.outgoing) null else chat.conversation,
+                item.sender,
                 item.outgoing,
                 item.text,
                 now,
@@ -49,6 +53,41 @@ class MessengerAccessibilityService : AccessibilityService() {
             )
             store.insert(message, ChatParser.screenKey(chat.conversation, item))
         }
+        captureMissingAvatars(chat.avatars)
+    }
+
+    /** Nothing exposes the avatar image itself, so it is cropped from a screenshot that is never stored. */
+    private fun captureMissingAvatars(avatars: List<ScreenAvatar>) {
+        val missing = avatars
+            .filter { it.node.right > it.node.left && it.node.bottom > it.node.top }
+            .distinctBy { it.owner }
+            .filterNot { AvatarStore.has(this, it.owner) }
+        if (missing.isEmpty()) return
+        takeScreenshot(
+            Display.DEFAULT_DISPLAY,
+            executor,
+            object : TakeScreenshotCallback {
+                override fun onSuccess(result: ScreenshotResult) {
+                    val buffer = result.hardwareBuffer
+                    val shot = Bitmap.wrapHardwareBuffer(buffer, result.colorSpace)
+                        ?.copy(Bitmap.Config.ARGB_8888, false)
+                    buffer.close()
+                    if (shot != null) missing.forEach { crop(shot, it) }
+                }
+
+                override fun onFailure(errorCode: Int) = Unit
+            },
+        )
+    }
+
+    private fun crop(shot: Bitmap, avatar: ScreenAvatar) {
+        val node = avatar.node
+        val left = node.left.coerceAtLeast(0)
+        val top = node.top.coerceAtLeast(0)
+        val width = minOf(node.right, shot.width) - left
+        val height = minOf(node.bottom, shot.height) - top
+        if (width <= 0 || height <= 0) return
+        AvatarStore.save(this, avatar.owner, Bitmap.createBitmap(shot, left, top, width, height))
     }
 
     private fun collect(node: AccessibilityNodeInfo, out: MutableList<ScreenNode>, depth: Int) {

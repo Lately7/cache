@@ -25,7 +25,7 @@ class ChatParserTest {
         val chat = ChatParser.parse(nodes, width, height)!!
         assertEquals("Lan Anh", chat.conversation)
         assertEquals(
-            listOf(ScreenMessage("chào", true, "đầu"), ScreenMessage("ừ", false, "chào")),
+            listOf(ScreenMessage("chào", true, "đầu"), ScreenMessage("ừ", false, "chào", "Lan Anh")),
             chat.messages,
         )
     }
@@ -55,6 +55,50 @@ class ChatParserTest {
         val draft = composer.copy(text = "đang gõ dở")
         val nodes = listOf(title, draft, incoming("đầu", 400), outgoing("chào", 600))
         assertEquals(listOf("chào"), ChatParser.parse(nodes, width, height)!!.messages.map { it.text })
+    }
+
+    private val suffix = ", double tap to see sent/receive date and time, double tap and hold to react on message"
+
+    @Test
+    fun realMessengerLabelsAreSplitIntoSenderAndText() {
+        val header = ScreenNode("Long Vu, Thread details", 200, 80, 600, 150)
+        val nodes = listOf(
+            header,
+            composer,
+            incoming("Hien, Hok lạnh, ha?$suffix", 400),
+            ScreenNode("Open Thd Hien's profile", 30, 500, 110, 580),
+            outgoing("Minh, can co ao len ha$suffix", 600),
+            outgoing("Add custom reaction", 720),
+            incoming("Hien, Xem voi$suffix", 800),
+        )
+        val chat = ChatParser.parse(nodes, width, height)!!
+        assertEquals("Long Vu", chat.conversation)
+        assertEquals(
+            listOf(
+                ScreenMessage("can co ao len ha", true, "Hok lạnh, ha?", null),
+                ScreenMessage("Xem voi", false, "can co ao len ha", "Hien"),
+            ),
+            chat.messages,
+        )
+    }
+
+    @Test
+    fun avatarBelongsToTheNameOnTheBubbleAboveIt() {
+        val nodes = listOf(
+            title,
+            composer,
+            incoming("Hien, chào$suffix", 400),
+            ScreenNode("Open Thd Hien's profile", 30, 500, 110, 580),
+        )
+        assertEquals("Hien", ChatParser.parse(nodes, width, height)!!.avatars.single().owner)
+    }
+
+    @Test
+    fun oldRowsCanBeCleaned() {
+        assertEquals(true, ChatParser.isNoise("Open Thd Hien's profile"))
+        assertEquals(true, ChatParser.isNoise("Add custom reaction"))
+        assertEquals(MarkedBubble("Minh", "có :3"), ChatParser.parseMarked("Minh, có :3$suffix"))
+        assertEquals("Long Vu", ChatParser.cleanTitle("Long Vu, Thread details"))
     }
 
     @Test
