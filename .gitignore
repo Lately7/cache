@@ -4,3 +4,4 @@ local.properties
 *.apk
 *.jks
 .idea/
+.kotlin/
