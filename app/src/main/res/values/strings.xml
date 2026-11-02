@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Lưu tin Messenger</string>
+    <string name="accessibility_description">Đọc các bong bóng chat trên màn hình khi bạn mở một đoạn chat trong Messenger, để lưu cả tin đã gửi và đã nhận. Chỉ hoạt động trong Messenger, dữ liệu chỉ nằm trên điện thoại này.</string>
+</resources>
