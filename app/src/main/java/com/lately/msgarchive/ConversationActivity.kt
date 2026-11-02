@@ -36,6 +36,7 @@ class ConversationActivity : Activity() {
             setBackgroundColor(colors.background)
         }
         root.addView(header(messages.lastOrNull { !it.outgoing }?.sender))
+        root.addView(divider(colors))
         root.addView(
             ListView(this).apply {
                 divider = null
@@ -48,12 +49,13 @@ class ConversationActivity : Activity() {
             LinearLayout.LayoutParams(-1, 0, 1f),
         )
         setContentView(root)
-        matchSystemBars(colors)
+        matchSystemBars()
     }
 
     private fun header(peer: String?) = LinearLayout(this).apply {
         orientation = LinearLayout.HORIZONTAL
         gravity = Gravity.CENTER_VERTICAL
+        setBackgroundColor(colors.background)
         setPadding(dp(4), dp(8), dp(12), dp(8))
         addView(
             TextView(context).apply {
@@ -183,6 +185,7 @@ class ConversationActivity : Activity() {
                 setPadding(dp(13), dp(8), dp(13), dp(8))
                 maxWidth = (resources.displayMetrics.widthPixels * 0.72).toInt()
                 setTextIsSelectable(true)
+                setLinkTextColor(colors.onBubbleOut)
             }
             val senderName = TextView(this@ConversationActivity).apply {
                 textSize = 12f

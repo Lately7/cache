@@ -2,7 +2,7 @@
 
 App Android lưu tin Messenger đã nhận và đã gửi của chính bạn vào máy. Dữ liệu chỉ nằm trên
 điện thoại: app không có quyền Internet và tắt sao lưu đám mây. Muốn lấy dữ liệu ra thì dùng
-nút **Xuất JSON**.
+nút **Xuất JSON**. Giao diện luôn ở nền tối, theo màu của Messenger bản tối.
 
 ## Cách thu tin
 

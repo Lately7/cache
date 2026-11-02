@@ -2,7 +2,6 @@ package com.lately.msgarchive
 
 import android.app.Activity
 import android.content.Context
-import android.content.res.Configuration
 import android.graphics.Outline
 import android.graphics.drawable.GradientDrawable
 import android.view.View
@@ -15,25 +14,30 @@ import java.util.Locale
 
 fun Context.dp(value: Int) = (value * resources.displayMetrics.density).toInt()
 
-/** Messenger's colours; the framework theme has no bubble colours to borrow. */
+/** Messenger's dark-mode colours; the framework theme has no bubble colours to borrow. */
 class Palette(context: Context) {
-    val dark =
-        context.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK == Configuration.UI_MODE_NIGHT_YES
-
-    val background = if (dark) 0xFF000000.toInt() else 0xFFFFFFFF.toInt()
-    val text = if (dark) 0xFFF5F5F5.toInt() else 0xFF050505.toInt()
-    val muted = if (dark) 0xFFA0A0A0.toInt() else 0xFF65676B.toInt()
-    val field = if (dark) 0xFF262626.toInt() else 0xFFF0F2F5.toInt()
-    val bubbleIn = if (dark) 0xFF303030.toInt() else 0xFFE4E6EB.toInt()
-    val bubbleOut = 0xFF0084FF.toInt()
+    val background = context.getColor(R.color.background)
+    val surface = context.getColor(R.color.surface)
+    val text = context.getColor(R.color.text)
+    val muted = context.getColor(R.color.muted)
+    val field = 0xFF3A3B3C.toInt()
+    val divider = 0xFF2F3031.toInt()
+    val bubbleIn = 0xFF3E4042.toInt()
+    val bubbleOut = context.getColor(R.color.accent)
     val onBubbleOut = 0xFFFFFFFF.toInt()
 }
 
-/** The framework theme keeps light status bar icons even on our white background, hiding them. */
-fun Activity.matchSystemBars(colors: Palette) {
+/** OEM themes can force dark icons onto the bars; the app is always black, so they must stay light. */
+fun Activity.matchSystemBars() {
     val light = WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS or
         WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS
-    window.insetsController?.setSystemBarsAppearance(if (colors.dark) 0 else light, light)
+    window.insetsController?.setSystemBarsAppearance(0, light)
+}
+
+/** A hairline under a header, as Messenger separates its toolbar from the list. */
+fun Context.divider(colors: Palette) = View(this).apply {
+    setBackgroundColor(colors.divider)
+    layoutParams = android.widget.LinearLayout.LayoutParams(-1, maxOf(1, dp(1) / 2))
 }
 
 fun Context.avatarView(sizeDp: Int) = ImageView(this).apply {

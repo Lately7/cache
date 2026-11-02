@@ -78,7 +78,9 @@ class MainActivity : Activity() {
                 override fun afterTextChanged(s: Editable?) = refresh()
             })
         }
-        root.addView(search, margins(dp(16), 0, dp(16), dp(6)))
+        root.addView(search, margins(dp(16), 0, dp(16), dp(10)))
+
+        root.addView(divider(colors))
 
         empty = TextView(this).apply {
             textSize = 15f
@@ -103,7 +105,7 @@ class MainActivity : Activity() {
             LinearLayout.LayoutParams(-1, 0, 1f),
         )
         setContentView(root)
-        matchSystemBars(colors)
+        matchSystemBars()
         // Without this the "still saving" notification stays hidden, though capture works either way.
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(arrayOf(NOTIFICATIONS), REQUEST_NOTIFICATIONS)
@@ -151,7 +153,7 @@ class MainActivity : Activity() {
     private fun settingsPanel() = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
         visibility = View.GONE
-        background = rounded(colors.field, 14)
+        background = rounded(colors.surface, 14)
         setPadding(dp(14), dp(10), dp(14), dp(10))
         panelStatus = TextView(context).apply {
             textSize = 13f

@@ -1,4 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <color name="icon_background">#0084FF</color>
+    <color name="background">#000000</color>
+    <color name="surface">#242526</color>
+    <color name="accent">#0084FF</color>
+    <color name="text">#E4E6EB</color>
+    <color name="muted">#B0B3B8</color>
 </resources>
