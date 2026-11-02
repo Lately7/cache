@@ -11,7 +11,10 @@ nút **Xuất JSON**.
 | Thông báo | Tin nhận (kể cả khi không mở Messenger) | Phải bật thông báo Messenger; thu hồi hoặc tắt thông báo thì mất |
 | Trợ năng | Tin gửi và nhận đang hiện trên màn hình | Chỉ khi mở đoạn chat; tin chưa cuộn tới thì không có |
 
-Ảnh, video và tin thoại không được lưu, chỉ lưu chữ. Tin thu từ màn hình mang giờ lúc app đọc
+Ảnh được cắt từ màn hình khi bạn mở đoạn chat nên chất lượng bằng ảnh đang hiển thị, không phải
+ảnh gốc. Video chỉ lưu được ảnh xem trước, file chỉ lưu được tên. Tin thoại chưa được hỗ trợ.
+Nhận diện ảnh dựa vào nhãn "Photo", "Video"; nếu Messenger dùng nhãn khác, vào ⚙ > Ghi cấu trúc
+màn hình để lấy nhãn thật. Tin thu từ màn hình mang giờ lúc app đọc
 được, không phải giờ gửi gốc; tin cũ tìm thấy khi cuộn lên được xếp đúng thứ tự và mượn giờ của
 tin ngay sau nó. Cuộn từ từ để luôn còn tin đã lưu trên màn hình, vì cuộn quá nhanh sẽ làm app
 không biết đoạn mới nằm ở đâu. Bong bóng trên cùng màn hình chỉ được lưu khi cuộn lên thấy tin
@@ -30,7 +33,9 @@ lại Trợ năng để app nhận quyền chụp màn hình.
    "Cài đặt bị hạn chế": vào Cài đặt > Ứng dụng > Lưu tin Messenger > menu ⋮ >
    **Cho phép cài đặt bị hạn chế**, rồi bật lại.
 3. Để app không bị tắt nền: trong mục pin của app, chọn cho phép chạy nền không giới hạn, và
-   khoá app trong màn hình đa nhiệm. Tên mục có thể khác tuỳ bản OriginOS.
+   khoá app trong màn hình đa nhiệm. Tên mục có thể khác tuỳ bản OriginOS. Đây là bước bắt buộc:
+   khi app bị buộc dừng (dọn nền, dọn RAM), Android tự tắt Trợ năng của app, và app không thể tự
+   bật lại. Đừng vuốt tắt app và đừng tắt thông báo "Đang lưu tin Messenger".
 4. Mở một đoạn chat, gửi thử một tin, rồi quay lại app xem có xuất hiện đúng chiều không.
 
 ## Build

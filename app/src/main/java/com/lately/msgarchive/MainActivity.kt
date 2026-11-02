@@ -2,10 +2,14 @@ package com.lately.msgarchive
 
 import android.app.Activity
 import android.app.AlertDialog
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.ComponentName
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Typeface
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.provider.Settings as SystemSettings
 import android.text.Editable
@@ -97,6 +101,10 @@ class MainActivity : Activity() {
         )
         setContentView(root)
         matchSystemBars(colors)
+        // Without this the "still saving" notification stays hidden, though capture works either way.
+        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(arrayOf(NOTIFICATIONS), REQUEST_NOTIFICATIONS)
+        }
     }
 
     override fun onResume() {
@@ -155,6 +163,12 @@ class MainActivity : Activity() {
         })
         addView(action("Xuất JSON") { startExport() })
         addView(action("Xoá tất cả") { confirmDelete() })
+        addView(action("Xem lỗi gần nhất") { showText("Lỗi gần nhất", Diagnostics.lastError(context)) })
+        addView(action("Ghi cấu trúc màn hình Messenger") {
+            Settings.requestDump(context)
+            Toast.makeText(context, "Mở một đoạn chat có ảnh trong Messenger, rồi quay lại bấm Xem cấu trúc", Toast.LENGTH_LONG).show()
+        })
+        addView(action("Xem cấu trúc đã ghi") { showText("Cấu trúc màn hình", Diagnostics.lastDump(context)) })
         addView(Switch(context).apply {
             text = "Tạm dừng lưu"
             textSize = 15f
@@ -189,7 +203,7 @@ class MainActivity : Activity() {
         banner.visibility = if (paused || !notifications || !accessibility) View.VISIBLE else View.GONE
         banner.text = when {
             paused -> "Đang tạm dừng lưu. Chạm để mở cài đặt."
-            !accessibility -> "Chưa bật Trợ năng nên chưa lưu được tin đã gửi. Chạm để bật."
+            !accessibility -> "Trợ năng đang tắt nên không lưu được tin đã gửi, ảnh và avatar. Máy có thể tự tắt khi dọn app chạy nền. Chạm để bật lại."
             else -> "Chưa bật đọc thông báo nên có thể sót tin nhận. Chạm để bật."
         }
         panelStatus.text = buildString {
@@ -233,12 +247,29 @@ class MainActivity : Activity() {
 
     private fun export(uri: Uri) {
         val message = try {
-            val count = contentResolver.openOutputStream(uri)!!.writer().use { store.exportJson(it) }
+            val stream = contentResolver.openOutputStream(uri) ?: throw java.io.IOException("không mở được file")
+            val count = stream.writer().use { store.exportJson(it) }
             "Đã xuất $count tin"
         } catch (e: java.io.IOException) {
             "Xuất thất bại: ${e.message}"
+        } catch (e: RuntimeException) {
+            // The chosen location belongs to another app, whose provider can refuse in its own way.
+            "Xuất thất bại: ${e.message}"
         }
         Toast.makeText(this, message, Toast.LENGTH_LONG).show()
+    }
+
+    private fun showText(title: String, text: String?) {
+        val body = text ?: "Chưa có dữ liệu."
+        AlertDialog.Builder(this)
+            .setTitle(title)
+            .setMessage(body)
+            .setPositiveButton("Sao chép") { _, _ ->
+                val clipboard = getSystemService(ClipboardManager::class.java)
+                clipboard.setPrimaryClip(ClipData.newPlainText(title, body))
+            }
+            .setNegativeButton("Đóng", null)
+            .show()
     }
 
     private fun confirmDelete() {
@@ -247,6 +278,7 @@ class MainActivity : Activity() {
             .setMessage("Không thể hoàn tác. Nên xuất JSON trước.")
             .setPositiveButton("Xoá") { _, _ ->
                 store.deleteAll()
+                MediaStoreFiles.deleteAll(this)
                 refresh()
             }
             .setNegativeButton("Huỷ", null)
@@ -319,5 +351,7 @@ class MainActivity : Activity() {
 
     private companion object {
         const val REQUEST_EXPORT = 1
+        const val REQUEST_NOTIFICATIONS = 2
+        const val NOTIFICATIONS = "android.permission.POST_NOTIFICATIONS"
     }
 }

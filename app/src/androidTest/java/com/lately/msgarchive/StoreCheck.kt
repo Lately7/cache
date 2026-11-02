@@ -56,6 +56,34 @@ class StoreCheck : Instrumentation() {
         val last = store.conversations().single()
         if (last.lastBody != "ok" || last.count != 11) failures.add("summary: $last")
 
+        // Hostile text must survive storage and search unchanged.
+        store.deleteAll()
+        val hostile = listOf("'; DROP TABLE messages;--", "100%", "a_b", "back\\slash", "😀‮gnp.exe", "dòng\nmới", "x".repeat(200_000))
+        hostile.forEachIndexed { i, text ->
+            store.insert(Message("Tên 'lạ\" %_/../x", "B", false, text, base + i, "notification"), "h$i")
+        }
+        if (store.messages("Tên 'lạ\" %_/../x").map { it.body } != hostile) failures.add("hostile text changed")
+        if (store.search("100%").size != 1) failures.add("percent is a wildcard")
+        if (store.search("a_b").size != 1) failures.add("underscore is a wildcard")
+        if (store.search("back\\slash").size != 1) failures.add("backslash search")
+
+        // Capture threads write while the screen reads.
+        store.deleteAll()
+        val threads = List(4) { t ->
+            Thread {
+                try {
+                    repeat(200) { i ->
+                        store.saveScreen(ScreenChat("C$t", listOf(ScreenMessage("m$i", false, "m${i - 1}", "B"))), base + i)
+                        store.conversations()
+                    }
+                } catch (e: RuntimeException) {
+                    synchronized(failures) { failures.add("thread: $e") }
+                }
+            }.apply { start() }
+        }
+        threads.forEach { it.join() }
+        if (store.conversations().sumOf { it.count } != 800) failures.add("concurrent count wrong")
+
         store.deleteAll()
         val result = Bundle().apply {
             putString(REPORT_KEY_STREAMRESULT, if (failures.isEmpty()) "STORE OK\n" else failures.joinToString("\n", postfix = "\n"))

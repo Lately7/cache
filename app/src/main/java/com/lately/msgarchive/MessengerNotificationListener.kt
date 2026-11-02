@@ -3,6 +3,7 @@ package com.lately.msgarchive
 import android.app.Notification
 import android.app.Person
 import android.graphics.drawable.Icon
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Parcelable
@@ -13,6 +14,15 @@ class MessengerNotificationListener : NotificationListenerService() {
 
     override fun onNotificationPosted(sbn: StatusBarNotification) {
         if (sbn.packageName != MESSENGER_PACKAGE || Settings.isPaused(this)) return
+        // Extras are another app's data; a malformed one must not take the listener down.
+        try {
+            handle(sbn)
+        } catch (e: RuntimeException) {
+            Diagnostics.record(this, e)
+        }
+    }
+
+    private fun handle(sbn: StatusBarNotification) {
         val notification = sbn.notification
         // Summaries repeat their children; ongoing ones are calls and chat heads.
         if (notification.flags and Notification.FLAG_GROUP_SUMMARY != 0) return
@@ -42,7 +52,7 @@ class MessengerNotificationListener : NotificationListenerService() {
             val sender = bundle.getCharSequence("sender")?.toString() ?: person?.name?.toString()
             if (sender != null) saveAvatar(sender, person?.icon)
             // MessagingStyle leaves the sender empty for the device owner's own replies.
-            save(store, conversation, sender, sender == null, text, time)
+            save(store, conversation, sender, sender == null, text, time, bundle)
         }
     }
 
@@ -64,10 +74,27 @@ class MessengerNotificationListener : NotificationListenerService() {
         outgoing: Boolean,
         text: String,
         time: Long,
+        bundle: Bundle? = null,
     ) {
-        val message = Message(conversation, sender, outgoing, text, time, "notification")
-        store.insert(message, ChatParser.notificationKey(conversation, sender, time, text))
+        val type = bundle?.getCharSequence("type")?.toString()
+        val uri = bundle?.getUriCompat("uri")
+        val kind = when {
+            uri == null -> null
+            type?.startsWith("video/") == true -> ChatParser.KIND_VIDEO
+            type?.startsWith("image/") == true -> ChatParser.KIND_IMAGE
+            else -> ChatParser.KIND_FILE
+        }
+        val message = Message(conversation, sender, outgoing, text, time, "notification", kind)
+        val key = ChatParser.notificationKey(conversation, sender, time, text)
+        val added = store.insert(message, key)
+        if (added && kind == ChatParser.KIND_IMAGE && uri != null) {
+            store.idForKey(key)?.let { MediaStoreFiles.copy(this, it, uri) }
+        }
     }
+
+    @Suppress("DEPRECATION")
+    private fun Bundle.getUriCompat(key: String): Uri? =
+        if (Build.VERSION.SDK_INT >= 33) getParcelable(key, Uri::class.java) else getParcelable(key)
 
     @Suppress("DEPRECATION")
     private fun Bundle.getParcelableArrayCompat(key: String): Array<out Parcelable>? =

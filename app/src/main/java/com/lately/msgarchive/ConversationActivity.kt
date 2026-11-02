@@ -1,6 +1,7 @@
 package com.lately.msgarchive
 
 import android.app.Activity
+import android.app.AlertDialog
 import android.graphics.Typeface
 import android.os.Bundle
 import android.text.TextUtils
@@ -80,7 +81,30 @@ class ConversationActivity : Activity() {
         )
     }
 
-    private class Holder(val time: TextView, val line: LinearLayout, val avatar: ImageView, val bubble: TextView)
+    private class Holder(
+        val time: TextView,
+        val senderName: TextView,
+        val line: LinearLayout,
+        val avatar: ImageView,
+        val picture: ImageView,
+        val bubble: TextView,
+    )
+
+    private fun showPicture(file: String) {
+        val bitmap = MediaStoreFiles.load(this, file) ?: return
+        val view = ImageView(this).apply {
+            setImageBitmap(bitmap)
+            adjustViewBounds = true
+        }
+        AlertDialog.Builder(this).setView(view).setNegativeButton("Đóng", null).show()
+    }
+
+    private fun attachmentLabel(message: Message) = when (message.kind) {
+        ChatParser.KIND_VIDEO -> "▶ Video: chỉ lưu được ảnh xem trước"
+        ChatParser.KIND_IMAGE -> if (message.media == null) "Ảnh: chưa chụp được" else null
+        ChatParser.KIND_FILE -> "📎 ${message.body}"
+        else -> message.body
+    }
 
     private inner class BubbleAdapter(val messages: List<Message>) : BaseAdapter() {
         override fun getCount() = messages.size
@@ -119,7 +143,20 @@ class ConversationActivity : Activity() {
                 holder.avatar.setImageBitmap(AvatarStore.load(this@ConversationActivity, message.sender, name))
             }
 
-            holder.bubble.text = message.body
+            // Only group chats need names: in a one-to-one chat the title already says who it is.
+            val showName = !message.outgoing && !joinsAbove && message.sender != null && message.sender != name
+            holder.senderName.visibility = if (showName) View.VISIBLE else View.GONE
+            holder.senderName.text = message.sender
+
+            val file = message.media
+            holder.picture.visibility = if (file != null) View.VISIBLE else View.GONE
+            if (file != null) {
+                holder.picture.setImageBitmap(MediaStoreFiles.load(this@ConversationActivity, file))
+                holder.picture.setOnClickListener { showPicture(file) }
+            }
+            val label = attachmentLabel(message)
+            holder.bubble.visibility = if (label != null) View.VISIBLE else View.GONE
+            holder.bubble.text = label
             holder.bubble.setTextColor(if (message.outgoing) colors.onBubbleOut else colors.text)
             val fill = if (message.outgoing) colors.bubbleOut else colors.bubbleIn
             holder.bubble.background = bubble(fill, message.outgoing, joinsAbove, joinsBelow)
@@ -146,16 +183,35 @@ class ConversationActivity : Activity() {
                 maxWidth = (resources.displayMetrics.widthPixels * 0.72).toInt()
                 setTextIsSelectable(true)
             }
+            val senderName = TextView(this@ConversationActivity).apply {
+                textSize = 12f
+                setTextColor(colors.muted)
+                setPadding(dp(49), dp(6), 0, 0)
+            }
+            val picture = ImageView(this@ConversationActivity).apply {
+                adjustViewBounds = true
+                maxWidth = (resources.displayMetrics.widthPixels * 0.68).toInt()
+                maxHeight = dp(320)
+                outlineProvider = android.view.ViewOutlineProvider.BACKGROUND
+                background = rounded(colors.bubbleIn, 16)
+                clipToOutline = true
+            }
+            val content = LinearLayout(this@ConversationActivity).apply {
+                orientation = LinearLayout.VERTICAL
+                addView(picture)
+                addView(bubbleView)
+            }
             val line = LinearLayout(this@ConversationActivity).apply {
                 orientation = LinearLayout.HORIZONTAL
                 addView(avatar)
-                addView(bubbleView)
+                addView(content)
             }
             return LinearLayout(this@ConversationActivity).apply {
                 orientation = LinearLayout.VERTICAL
                 addView(time, LinearLayout.LayoutParams(-1, -2))
+                addView(senderName, LinearLayout.LayoutParams(-1, -2))
                 addView(line, LinearLayout.LayoutParams(-1, -2))
-                tag = Holder(time, line, avatar, bubbleView)
+                tag = Holder(time, senderName, line, avatar, picture, bubbleView)
             }
         }
     }

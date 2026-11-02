@@ -16,3 +16,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "messenger-archive"
 include(":app")
+if (file("fake-messenger").exists()) include(":fake-messenger")

@@ -15,6 +15,8 @@ data class Message(
     val body: String,
     val timestamp: Long,
     val source: String,
+    val kind: String? = null,
+    val media: String? = null,
 )
 
 data class Conversation(
@@ -27,7 +29,7 @@ data class Conversation(
 )
 
 class MessageStore private constructor(context: Context) :
-    SQLiteOpenHelper(context, "archive.db", null, 3) {
+    SQLiteOpenHelper(context, "archive.db", null, 4) {
 
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL(
@@ -40,7 +42,9 @@ class MessageStore private constructor(context: Context) :
                 ts INTEGER NOT NULL,
                 seq REAL NOT NULL,
                 source TEXT NOT NULL,
-                dedupe_key TEXT NOT NULL UNIQUE)""",
+                dedupe_key TEXT NOT NULL UNIQUE,
+                kind TEXT,
+                media TEXT)""",
         )
         db.execSQL("CREATE INDEX idx_conv_seq ON messages(conversation, seq)")
     }
@@ -52,6 +56,10 @@ class MessageStore private constructor(context: Context) :
             db.execSQL("UPDATE messages SET seq=ts")
             db.execSQL("DROP INDEX IF EXISTS idx_conv_ts")
             db.execSQL("CREATE INDEX idx_conv_seq ON messages(conversation, seq)")
+        }
+        if (oldVersion < 4) {
+            db.execSQL("ALTER TABLE messages ADD COLUMN kind TEXT")
+            db.execSQL("ALTER TABLE messages ADD COLUMN media TEXT")
         }
     }
 
@@ -178,19 +186,40 @@ class MessageStore private constructor(context: Context) :
             seqs = run.indices.map { base + it }
             time = now
         } else {
-            val floor = lower?.seq ?: before(conversation, upper.seq)?.seq ?: (upper.seq - ONE_MINUTE_MS * (run.size + 1))
+            // Repeated text can match rows out of order, leaving the "lower" neighbour above the upper one.
+            val floor = lower?.seq?.takeIf { it < upper.seq }
+                ?: before(conversation, upper.seq)?.seq
+                ?: (upper.seq - ONE_MINUTE_MS * (run.size + 1))
             seqs = ChatParser.between(floor, upper.seq, run.size)
             time = upper.ts
         }
         run.forEachIndexed { i, item ->
-            val message = Message(conversation, item.sender, item.outgoing, item.text, time, "screen")
+            val message = Message(conversation, item.sender, item.outgoing, item.text, time, "screen", item.kind)
             insert(message, ChatParser.screenKey(conversation, item), seqs[i])
         }
+    }
+
+    fun idForKey(key: String): Long? {
+        readableDatabase.rawQuery("SELECT id FROM messages WHERE dedupe_key=?", arrayOf(key)).use {
+            return if (it.moveToFirst()) it.getLong(0) else null
+        }
+    }
+
+    fun idMissingMedia(key: String): Long? {
+        readableDatabase.rawQuery("SELECT id FROM messages WHERE dedupe_key=? AND media IS NULL", arrayOf(key)).use {
+            return if (it.moveToFirst()) it.getLong(0) else null
+        }
+    }
+
+    fun setMedia(id: Long, file: String) {
+        val values = ContentValues().apply { put("media", file) }
+        writableDatabase.update("messages", values, "id=?", arrayOf(id.toString()))
     }
 
     fun insert(message: Message, key: String, seq: Double = message.timestamp.toDouble()): Boolean {
         val values = ContentValues().apply {
             put("seq", seq)
+            put("kind", message.kind)
             put("conversation", message.conversation)
             put("sender", message.sender)
             put("outgoing", if (message.outgoing) 1 else 0)
@@ -251,7 +280,7 @@ class MessageStore private constructor(context: Context) :
             json.setIndent(" ")
             json.beginArray()
             readableDatabase.rawQuery(
-                "SELECT conversation, sender, outgoing, body, ts, source FROM messages ORDER BY conversation, seq, id",
+                "SELECT conversation, sender, outgoing, body, ts, source, kind, media FROM messages ORDER BY conversation, seq, id",
                 null,
             ).use { c ->
                 while (c.moveToNext()) {
@@ -262,6 +291,8 @@ class MessageStore private constructor(context: Context) :
                     json.name("body").value(c.getString(3))
                     json.name("timestamp").value(c.getLong(4))
                     json.name("source").value(c.getString(5))
+                    json.name("kind").value(if (c.isNull(6)) null else c.getString(6))
+                    json.name("media").value(if (c.isNull(7)) null else c.getString(7))
                     json.endObject()
                     count++
                 }
@@ -273,7 +304,7 @@ class MessageStore private constructor(context: Context) :
 
     private fun query(clause: String, args: Array<String>): List<Message> {
         readableDatabase.rawQuery(
-            "SELECT conversation, sender, outgoing, body, ts, source FROM messages $clause",
+            "SELECT conversation, sender, outgoing, body, ts, source, kind, media FROM messages $clause",
             args,
         ).use { c ->
             val out = ArrayList<Message>(c.count)
@@ -286,6 +317,8 @@ class MessageStore private constructor(context: Context) :
                         c.getString(3),
                         c.getLong(4),
                         c.getString(5),
+                        if (c.isNull(6)) null else c.getString(6),
+                        if (c.isNull(7)) null else c.getString(7),
                     ),
                 )
             }

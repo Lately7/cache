@@ -94,6 +94,73 @@ class ChatParserTest {
     }
 
     @Test
+    fun tallShortLabelIsAnAttachmentButPlainTextIsNot() {
+        val photo = ScreenNode("Hien, Photo$suffix", 130, 700, 700, 1300)
+        val nodes = listOf(title, composer, incoming("Hien, đầu$suffix", 400), incoming("Hien, gửi photo nhé$suffix", 550), photo)
+        val chat = ChatParser.parse(nodes, width, height)!!
+        assertEquals(listOf(null, ChatParser.KIND_IMAGE), chat.messages.map { it.kind })
+        assertEquals(photo, chat.media.single().node)
+    }
+
+    @Test
+    fun fileIsRecognisedByNameWithoutBeingTall() {
+        val nodes = listOf(title, composer, incoming("Hien, đầu$suffix", 400), incoming("Hien, baocao.pdf$suffix", 550))
+        val chat = ChatParser.parse(nodes, width, height)!!
+        assertEquals(ChatParser.KIND_FILE, chat.messages.single().kind)
+        assertEquals(0, chat.media.size)
+    }
+
+    @Test
+    fun senderNamedLikeAStatusLineKeepsTheirMessages() {
+        val nodes = listOf(title, composer, incoming("Active, đầu$suffix", 400), incoming("Seen, chào$suffix", 550))
+        assertEquals(listOf("chào"), ChatParser.parse(nodes, width, height)!!.messages.map { it.text })
+    }
+
+    @Test
+    fun threeIdenticalMessagesGetThreeIdentities() {
+        val nodes = listOf(
+            title,
+            composer,
+            incoming("Hien, đầu$suffix", 400),
+            incoming("Hien, ok$suffix", 520),
+            incoming("Hien, ok$suffix", 640),
+            incoming("Hien, ok$suffix", 760),
+        )
+        val keys = ChatParser.parse(nodes, width, height)!!.messages.map { ChatParser.screenKey("A", it) }
+        assertEquals(3, keys.toSet().size)
+    }
+
+    @Test
+    fun linksAndPhrasesAreNotFiles() {
+        for (text in listOf("vnexpress.net", "gửi file nhé", "ok.hihi")) {
+            val nodes = listOf(title, composer, incoming("Hien, đầu$suffix", 400), incoming("Hien, $text$suffix", 550))
+            assertNull(text, ChatParser.parse(nodes, width, height)!!.messages.single().kind)
+        }
+    }
+
+    @Test
+    fun forgedLabelInsideAMessageStaysPartOfTheText() {
+        val forged = "x$suffix"
+        val nodes = listOf(title, composer, incoming("Hien, đầu$suffix", 400), incoming("Hien, $forged$suffix", 550))
+        val message = ChatParser.parse(nodes, width, height)!!.messages.single()
+        assertEquals("Hien", message.sender)
+        assertEquals(forged, message.text)
+    }
+
+    @Test
+    fun blankChatTitleIsIgnored() {
+        val nodes = listOf(ScreenNode(", Thread details", 200, 80, 600, 150), composer, incoming("Hien, a$suffix", 400))
+        assertNull(ChatParser.parse(nodes, width, height))
+    }
+
+    @Test(timeout = 2000)
+    fun hugeLabelsParseQuickly() {
+        val huge = "a, ".repeat(50_000)
+        val nodes = listOf(title, composer, incoming("Hien, đầu$suffix", 400), incoming("Hien, $huge$suffix", 550))
+        assertEquals(1, ChatParser.parse(nodes, width, height)!!.messages.size)
+    }
+
+    @Test
     fun keyboardOpenStillCountsAsAChat() {
         val raised = composer.copy(top = 1350, bottom = 1450)
         val nodes = listOf(title, raised, incoming("đầu", 400), outgoing("chào", 600))

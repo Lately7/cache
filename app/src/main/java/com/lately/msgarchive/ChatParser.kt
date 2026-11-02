@@ -8,6 +8,7 @@ data class ScreenNode(
     val right: Int,
     val bottom: Int,
     val editable: Boolean = false,
+    val className: String = "",
 )
 
 data class ScreenMessage(
@@ -15,7 +16,11 @@ data class ScreenMessage(
     val outgoing: Boolean,
     val previousText: String,
     val sender: String? = null,
+    val kind: String? = null,
 )
+
+/** A bubble with an attachment, plus where it is on screen so its picture can be cropped. */
+data class ScreenMedia(val message: ScreenMessage, val node: ScreenNode)
 
 /** An avatar on screen; [owner] is the name its messages carry, which can differ from the profile name. */
 data class ScreenAvatar(val owner: String, val node: ScreenNode)
@@ -24,6 +29,7 @@ data class ScreenChat(
     val conversation: String,
     val messages: List<ScreenMessage>,
     val avatars: List<ScreenAvatar> = emptyList(),
+    val media: List<ScreenMedia> = emptyList(),
 )
 
 data class MarkedBubble(val sender: String, val text: String)
@@ -33,6 +39,10 @@ data class MarkedBubble(val sender: String, val text: String)
  * unit-tested: Messenger exposes no stable view ids, so labels and layout are the only signals.
  */
 object ChatParser {
+    const val KIND_IMAGE = "image"
+    const val KIND_VIDEO = "video"
+    const val KIND_FILE = "file"
+
     private val options = setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)
 
     // Messenger's accessibility label for a bubble: "Sender, text, double tap to see ...".
@@ -51,7 +61,26 @@ object ChatParser {
         Regex("""^(đang hoạt động|hoạt động|active)\b.*""", RegexOption.IGNORE_CASE),
     )
 
-    fun isNoise(text: String) = text.isBlank() || NOISE.any { it.matches(text.trim()) }
+    private val KINDS = listOf(
+        KIND_VIDEO to Regex("""\b(video|clip)\b""", RegexOption.IGNORE_CASE),
+        KIND_IMAGE to Regex("""\b(photo|photos|image|picture|sticker|gif|ảnh|hình)\b""", RegexOption.IGNORE_CASE),
+        // Whole label only: "gửi file nhé" and "vnexpress.net" are ordinary text.
+        KIND_FILE to Regex(
+            """^(file|attachment|tệp)$|^\S+\.(pdf|docx?|xlsx?|pptx?|zip|rar|7z|txt|csv|apk)$""",
+            RegexOption.IGNORE_CASE,
+        ),
+    )
+    private const val MAX_MEDIA_LABEL = 60
+
+    /** A short label on a bubble too tall for one line of text is an attachment; files are recognised by name alone. */
+    fun mediaKind(text: String, node: ScreenNode, width: Int): String? {
+        if (text.length > MAX_MEDIA_LABEL) return null
+        val kind = KINDS.firstOrNull { it.second.containsMatchIn(text) }?.first ?: return null
+        val tall = node.bottom - node.top >= width * 0.2
+        return kind.takeIf { tall || it == KIND_FILE }
+    }
+
+    fun isNoise(text: String) =text.isBlank() || NOISE.any { it.matches(text.trim()) }
 
     fun cleanTitle(title: String) = title.trim().replace(TITLE_SUFFIX, "")
 
@@ -67,7 +96,7 @@ object ChatParser {
         val title = nodes
             .filter { !it.editable && it.bottom <= headerBottom && it.left > width * 0.08 && !isNoise(it.text) }
             .minWithOrNull(compareBy({ it.top }, { it.left }))
-            ?.text?.let(::cleanTitle) ?: return null
+            ?.text?.let(::cleanTitle)?.takeIf { it.isNotBlank() } ?: return null
 
         val body = nodes
             .filter { !it.editable && it.top >= headerBottom && it.bottom <= composer.top }
@@ -76,6 +105,7 @@ object ChatParser {
         val labelled = body.any { parseMarked(it.text) != null }
 
         val ordered = ArrayList<ScreenMessage>()
+        val orderedNodes = ArrayList<ScreenNode>()
         val avatars = ArrayList<ScreenAvatar>()
         var last: ScreenNode? = null
         for (node in body) {
@@ -86,8 +116,9 @@ object ChatParser {
                 avatars.add(ScreenAvatar(owner, node))
                 continue
             }
-            if (isNoise(node.text)) continue
+            // Label first: a sender called "Active" or "Seen" must not look like a status line.
             val marked = parseMarked(node.text)
+            if (marked == null && isNoise(node.text)) continue
             if (labelled && (marked == null || marked.text.isBlank())) continue
 
             // Messenger often repeats a bubble's text on a parent and a child node.
@@ -99,15 +130,24 @@ object ChatParser {
             if (kotlin.math.abs(leftGap - rightGap) < width * 0.03) continue
             val outgoing = rightGap < leftGap
             val sender = if (outgoing) null else marked?.sender ?: title
-            ordered.add(ScreenMessage(marked?.text ?: node.text.trim(), outgoing, "", sender))
+            val text = marked?.text ?: node.text.trim()
+            ordered.add(ScreenMessage(text, outgoing, "", sender, mediaKind(text, node, width)))
+            orderedNodes.add(node)
             last = node
         }
 
         // The top bubble has no predecessor yet, so its identity would change on scroll; it is saved once it has one.
+        var repeats = 0
         val messages = ordered.drop(1).mapIndexed { i, message ->
-            message.copy(previousText = ordered[i].text)
+            val previous = ordered[i].text
+            repeats = if (message.text == previous) repeats + 1 else 0
+            // "ok, ok, ok" would otherwise give the second and third bubble the same identity.
+            message.copy(previousText = if (repeats > 1) "$previous\u0002$repeats" else previous)
         }
-        return ScreenChat(title, messages, avatars)
+        val media = messages.mapIndexedNotNull { i, message ->
+            if (message.kind == KIND_IMAGE || message.kind == KIND_VIDEO) ScreenMedia(message, orderedNodes[i + 1]) else null
+        }
+        return ScreenChat(title, messages, avatars, media)
     }
 
     /** Evenly spaced sort positions strictly between two neighbours, for messages found while scrolling back. */
