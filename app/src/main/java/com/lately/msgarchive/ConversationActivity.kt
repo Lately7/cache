@@ -133,6 +133,7 @@ class ConversationActivity : Activity() {
             holder.time.text = separatorTime(message.timestamp)
 
             holder.line.gravity = if (message.outgoing) Gravity.END else Gravity.START
+            (holder.bubble.parent as LinearLayout).gravity = holder.line.gravity
             holder.line.setPadding(0, if (joinsAbove) dp(1) else dp(6), 0, 0)
             holder.avatar.visibility = when {
                 message.outgoing -> View.GONE
@@ -198,8 +199,9 @@ class ConversationActivity : Activity() {
             }
             val content = LinearLayout(this@ConversationActivity).apply {
                 orientation = LinearLayout.VERTICAL
-                addView(picture)
-                addView(bubbleView)
+                // Vertical layouts stretch children by default, which would pad pictures with grey bars.
+                addView(picture, LinearLayout.LayoutParams(-2, -2))
+                addView(bubbleView, LinearLayout.LayoutParams(-2, -2))
             }
             val line = LinearLayout(this@ConversationActivity).apply {
                 orientation = LinearLayout.HORIZONTAL
