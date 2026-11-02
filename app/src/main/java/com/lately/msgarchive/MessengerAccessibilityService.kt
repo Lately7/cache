@@ -26,6 +26,7 @@ class MessengerAccessibilityService : AccessibilityService() {
 
     override fun onDestroy() {
         handler.removeCallbacks(scan)
+        executor.shutdown()
         super.onDestroy()
     }
 
@@ -39,27 +40,16 @@ class MessengerAccessibilityService : AccessibilityService() {
         val metrics = resources.displayMetrics
         val chat = ChatParser.parse(nodes, metrics.widthPixels, metrics.heightPixels) ?: return
 
-        val store = MessageStore.get(this)
-        val now = System.currentTimeMillis()
-        for (item in chat.messages) {
-            if (!item.outgoing && store.seenInNotification(chat.conversation, item.text, now)) continue
-            val message = Message(
-                chat.conversation,
-                item.sender,
-                item.outgoing,
-                item.text,
-                now,
-                "screen",
-            )
-            store.insert(message, ChatParser.screenKey(chat.conversation, item))
-        }
+        // Writing to disk on the main thread would make the service lag behind Messenger.
+        executor.execute { MessageStore.get(this).saveScreen(chat, System.currentTimeMillis()) }
         captureMissingAvatars(chat.avatars)
     }
 
     /** Nothing exposes the avatar image itself, so it is cropped from a screenshot that is never stored. */
     private fun captureMissingAvatars(avatars: List<ScreenAvatar>) {
         val missing = avatars
-            .filter { it.node.right > it.node.left && it.node.bottom > it.node.top }
+            // A clipped avatar is no longer square and would be saved stretched.
+            .filter { it.node.right - it.node.left > 0 && it.node.right - it.node.left == it.node.bottom - it.node.top }
             .distinctBy { it.owner }
             .filterNot { AvatarStore.has(this, it.owner) }
         if (missing.isEmpty()) return

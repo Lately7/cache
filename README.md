@@ -12,8 +12,10 @@ nút **Xuất JSON**.
 | Trợ năng | Tin gửi và nhận đang hiện trên màn hình | Chỉ khi mở đoạn chat; tin chưa cuộn tới thì không có |
 
 Ảnh, video và tin thoại không được lưu, chỉ lưu chữ. Tin thu từ màn hình mang giờ lúc app đọc
-được, không phải giờ gửi gốc. Bong bóng trên cùng màn hình chỉ được lưu khi cuộn lên thấy tin
-phía trước nó.
+được, không phải giờ gửi gốc; tin cũ tìm thấy khi cuộn lên được xếp đúng thứ tự và mượn giờ của
+tin ngay sau nó. Cuộn từ từ để luôn còn tin đã lưu trên màn hình, vì cuộn quá nhanh sẽ làm app
+không biết đoạn mới nằm ở đâu. Bong bóng trên cùng màn hình chỉ được lưu khi cuộn lên thấy tin
+phía trước nó. Hai đoạn chat trùng tên sẽ bị gộp làm một.
 
 Avatar lấy từ ảnh trong thông báo, hoặc cắt từ màn hình khi thấy avatar trong đoạn chat. Ảnh chụp
 màn hình chỉ dùng để cắt avatar rồi bỏ, không lưu lại. Chưa có avatar thì hiện chữ cái đầu.
@@ -40,6 +42,13 @@ Cần JDK 17 và Android SDK (platform 35).
 ```
 
 APK nằm ở `app/build/outputs/apk/debug/app-debug.apk`.
+
+Kiểm tra phần lưu trữ trên SQLite thật (chỉ chạy trên máy ảo, vì lệnh này xoá dữ liệu đã lưu):
+
+```bash
+./gradlew installDebug installDebugAndroidTest
+adb shell am instrument -w com.lately.msgarchive.test/com.lately.msgarchive.StoreCheck
+```
 
 Bản debug ký bằng khoá của máy build; build từ máy khác rồi cài đè sẽ phải gỡ app trước, và gỡ
 app là mất dữ liệu đã lưu, nên hãy xuất JSON trước.

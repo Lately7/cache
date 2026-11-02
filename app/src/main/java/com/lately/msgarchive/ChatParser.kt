@@ -60,7 +60,8 @@ object ChatParser {
 
     /** Returns null unless this looks like an open chat; a composer box is what separates it from the chat list. */
     fun parse(nodes: List<ScreenNode>, width: Int, height: Int): ScreenChat? {
-        val composer = nodes.filter { it.editable && it.top > height * 0.6 }.minByOrNull { it.top } ?: return null
+        // The keyboard pushes the composer up to mid-screen; the chat list's search box stays near the top.
+        val composer = nodes.filter { it.editable && it.top > height * 0.3 }.maxByOrNull { it.top } ?: return null
         val headerBottom = (height * 0.13).toInt()
 
         val title = nodes
@@ -87,7 +88,7 @@ object ChatParser {
             }
             if (isNoise(node.text)) continue
             val marked = parseMarked(node.text)
-            if (labelled && marked == null) continue
+            if (labelled && (marked == null || marked.text.isBlank())) continue
 
             // Messenger often repeats a bubble's text on a parent and a child node.
             val prev = last
@@ -107,6 +108,12 @@ object ChatParser {
             message.copy(previousText = ordered[i].text)
         }
         return ScreenChat(title, messages, avatars)
+    }
+
+    /** Evenly spaced sort positions strictly between two neighbours, for messages found while scrolling back. */
+    fun between(lower: Double, upper: Double, count: Int): List<Double> {
+        val step = (upper - lower) / (count + 1)
+        return List(count) { lower + step * (it + 1) }
     }
 
     /** Same text repeated in a chat is legitimate; the preceding bubble tells re-reads apart from new messages. */

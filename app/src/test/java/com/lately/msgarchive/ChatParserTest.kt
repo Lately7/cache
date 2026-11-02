@@ -94,6 +94,24 @@ class ChatParserTest {
     }
 
     @Test
+    fun keyboardOpenStillCountsAsAChat() {
+        val raised = composer.copy(top = 1350, bottom = 1450)
+        val nodes = listOf(title, raised, incoming("đầu", 400), outgoing("chào", 600))
+        assertEquals(listOf("chào"), ChatParser.parse(nodes, width, height)!!.messages.map { it.text })
+    }
+
+    @Test
+    fun chatListSearchBoxIsNotAComposer() {
+        val searchBox = ScreenNode("Search", 40, 200, 1040, 300, editable = true)
+        assertNull(ChatParser.parse(listOf(title, searchBox, incoming("hi", 500)), width, height))
+    }
+
+    @Test
+    fun scrolledBackMessagesFitBetweenTheirNeighbours() {
+        assertEquals(listOf(11.0, 12.0, 13.0), ChatParser.between(10.0, 14.0, 3))
+    }
+
+    @Test
     fun oldRowsCanBeCleaned() {
         assertEquals(true, ChatParser.isNoise("Open Thd Hien's profile"))
         assertEquals(true, ChatParser.isNoise("Add custom reaction"))

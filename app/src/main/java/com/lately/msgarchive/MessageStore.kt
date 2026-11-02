@@ -27,7 +27,7 @@ data class Conversation(
 )
 
 class MessageStore private constructor(context: Context) :
-    SQLiteOpenHelper(context, "archive.db", null, 2) {
+    SQLiteOpenHelper(context, "archive.db", null, 3) {
 
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL(
@@ -38,51 +38,159 @@ class MessageStore private constructor(context: Context) :
                 outgoing INTEGER NOT NULL,
                 body TEXT NOT NULL,
                 ts INTEGER NOT NULL,
+                seq REAL NOT NULL,
                 source TEXT NOT NULL,
                 dedupe_key TEXT NOT NULL UNIQUE)""",
         )
-        db.execSQL("CREATE INDEX idx_conv_ts ON messages(conversation, ts)")
+        db.execSQL("CREATE INDEX idx_conv_seq ON messages(conversation, seq)")
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
         if (oldVersion < 2) cleanScreenRows(db)
+        if (oldVersion < 3) {
+            db.execSQL("ALTER TABLE messages ADD COLUMN seq REAL NOT NULL DEFAULT 0")
+            db.execSQL("UPDATE messages SET seq=ts")
+            db.execSQL("DROP INDEX IF EXISTS idx_conv_ts")
+            db.execSQL("CREATE INDEX idx_conv_seq ON messages(conversation, seq)")
+        }
     }
+
+    private class OldRow(val id: Long, val conversation: String, val outgoing: Boolean, val body: String)
 
     /** Version 1 stored raw accessibility labels; reparse them so existing chats are kept, not lost. */
     private fun cleanScreenRows(db: SQLiteDatabase) {
-        val previous = HashMap<String, String>()
+        // Read everything first: changing rows under an open cursor can skip some of them.
+        val rows = ArrayList<OldRow>()
         db.rawQuery(
             "SELECT id, conversation, outgoing, body FROM messages WHERE source='screen' ORDER BY conversation, ts, id",
             null,
         ).use { c ->
-            while (c.moveToNext()) {
-                val id = arrayOf(c.getLong(0).toString())
-                val conversation = ChatParser.cleanTitle(c.getString(1))
-                val outgoing = c.getInt(2) == 1
-                val body = c.getString(3)
-                if (ChatParser.isNoise(body)) {
-                    db.delete("messages", "id=?", id)
-                    continue
-                }
-                val marked = ChatParser.parseMarked(body)
-                val text = marked?.text ?: body
-                val sender = if (outgoing) null else marked?.sender ?: conversation
-                val message = ScreenMessage(text, outgoing, previous[conversation].orEmpty(), sender)
-                val values = ContentValues().apply {
-                    put("conversation", conversation)
-                    put("sender", sender)
-                    put("body", text)
-                    put("dedupe_key", ChatParser.screenKey(conversation, message))
-                }
-                val updated = db.updateWithOnConflict("messages", values, "id=?", id, SQLiteDatabase.CONFLICT_IGNORE)
-                if (updated == 0) db.delete("messages", "id=?", id)
-                previous[conversation] = text
+            while (c.moveToNext()) rows.add(OldRow(c.getLong(0), c.getString(1), c.getInt(2) == 1, c.getString(3)))
+        }
+
+        val previous = HashMap<String, String>()
+        for (row in rows) {
+            val id = arrayOf(row.id.toString())
+            val conversation = ChatParser.cleanTitle(row.conversation)
+            if (ChatParser.isNoise(row.body)) {
+                db.delete("messages", "id=?", id)
+                continue
             }
+            val marked = ChatParser.parseMarked(row.body)
+            val text = marked?.text ?: row.body
+            val sender = if (row.outgoing) null else marked?.sender ?: conversation
+            val message = ScreenMessage(text, row.outgoing, previous[conversation].orEmpty(), sender)
+            val values = ContentValues().apply {
+                put("conversation", conversation)
+                put("sender", sender)
+                put("body", text)
+                put("dedupe_key", ChatParser.screenKey(conversation, message))
+            }
+            val updated = db.updateWithOnConflict("messages", values, "id=?", id, SQLiteDatabase.CONFLICT_IGNORE)
+            if (updated == 0) db.delete("messages", "id=?", id)
+            previous[conversation] = text
         }
     }
 
-    fun insert(message: Message, key: String): Boolean {
+    private class Known(val seq: Double, val ts: Long)
+
+    private fun known(conversation: String, item: ScreenMessage, now: Long): Known? {
+        val db = readableDatabase
+        db.rawQuery(
+            "SELECT seq, ts FROM messages WHERE dedupe_key=?",
+            arrayOf(ChatParser.screenKey(conversation, item)),
+        ).use { if (it.moveToFirst()) return Known(it.getDouble(0), it.getLong(1)) }
+        // A message usually arrives as a notification first, then shows up again when the chat is opened.
+        val since = now - TimeUnit.DAYS.toMillis(NOTIFICATION_MATCH_DAYS)
+        db.rawQuery(
+            """SELECT seq, ts FROM messages WHERE conversation=? AND body=? AND outgoing=?
+               AND source='notification' AND ts>=? ORDER BY seq DESC LIMIT 1""",
+            arrayOf(conversation, item.text, if (item.outgoing) "1" else "0", since.toString()),
+        ).use { if (it.moveToFirst()) return Known(it.getDouble(0), it.getLong(1)) }
+        return null
+    }
+
+    private fun neighbour(conversation: String, sql: String, seq: Double): Known? {
+        readableDatabase.rawQuery(sql, arrayOf(conversation, seq.toString())).use {
+            return if (it.moveToFirst()) Known(it.getDouble(0), it.getLong(1)) else null
+        }
+    }
+
+    private fun after(conversation: String, seq: Double) = neighbour(
+        conversation,
+        "SELECT seq, ts FROM messages WHERE conversation=? AND seq>? ORDER BY seq LIMIT 1",
+        seq,
+    )
+
+    private fun before(conversation: String, seq: Double) = neighbour(
+        conversation,
+        "SELECT seq, ts FROM messages WHERE conversation=? AND seq<? ORDER BY seq DESC LIMIT 1",
+        seq,
+    )
+
+    private fun lastSeq(conversation: String): Double? {
+        readableDatabase.rawQuery(
+            "SELECT MAX(seq) FROM messages WHERE conversation=?",
+            arrayOf(conversation),
+        ).use { return if (it.moveToFirst() && !it.isNull(0)) it.getDouble(0) else null }
+    }
+
+    /**
+     * Saves what is on screen in chat order. Scrolling back reveals older messages after newer ones
+     * were stored, so new bubbles are placed relative to the known bubbles around them. Their real
+     * send time is not on screen: a scrolled-back message takes the time of the message after it.
+     */
+    fun saveScreen(chat: ScreenChat, now: Long) {
+        val conversation = chat.conversation
+        val items = chat.messages
+        writableDatabase.beginTransaction()
+        try {
+            val found = items.map { known(conversation, it, now) }
+            var start = 0
+            while (start < items.size) {
+                if (found[start] != null) {
+                    start++
+                    continue
+                }
+                var end = start
+                while (end < items.size && found[end] == null) end++
+                saveRun(conversation, items.subList(start, end), found.getOrNull(start - 1), found.getOrNull(end), now)
+                start = end
+            }
+            writableDatabase.setTransactionSuccessful()
+        } finally {
+            writableDatabase.endTransaction()
+        }
+    }
+
+    private fun saveRun(
+        conversation: String,
+        run: List<ScreenMessage>,
+        lower: Known?,
+        visibleUpper: Known?,
+        now: Long,
+    ) {
+        val upper = visibleUpper ?: lower?.let { after(conversation, it.seq) }
+        val seqs: List<Double>
+        val time: Long
+        if (upper == null) {
+            val base = maxOf(now.toDouble(), (lastSeq(conversation) ?: 0.0) + 1)
+            seqs = run.indices.map { base + it }
+            time = now
+        } else {
+            val floor = lower?.seq ?: before(conversation, upper.seq)?.seq ?: (upper.seq - ONE_MINUTE_MS * (run.size + 1))
+            seqs = ChatParser.between(floor, upper.seq, run.size)
+            time = upper.ts
+        }
+        run.forEachIndexed { i, item ->
+            val message = Message(conversation, item.sender, item.outgoing, item.text, time, "screen")
+            insert(message, ChatParser.screenKey(conversation, item), seqs[i])
+        }
+    }
+
+    fun insert(message: Message, key: String, seq: Double = message.timestamp.toDouble()): Boolean {
         val values = ContentValues().apply {
+            put("seq", seq)
             put("conversation", message.conversation)
             put("sender", message.sender)
             put("outgoing", if (message.outgoing) 1 else 0)
@@ -94,22 +202,18 @@ class MessageStore private constructor(context: Context) :
         return writableDatabase.insertWithOnConflict("messages", null, values, SQLiteDatabase.CONFLICT_IGNORE) != -1L
     }
 
-    /** A message usually arrives as a notification first, then shows up again when the chat is opened. */
-    fun seenInNotification(conversation: String, body: String, now: Long): Boolean {
-        val since = now - TimeUnit.DAYS.toMillis(NOTIFICATION_MATCH_DAYS)
-        readableDatabase.rawQuery(
-            "SELECT 1 FROM messages WHERE conversation=? AND body=? AND source='notification' AND ts>=? LIMIT 1",
-            arrayOf(conversation, body, since.toString()),
-        ).use { return it.moveToFirst() }
-    }
-
     fun conversations(): List<Conversation> {
-        // SQLite returns the row holding MAX(ts) for the bare body column.
+        // Rows can share a seq, so the last message is picked by seq and id rather than MAX(seq).
         readableDatabase.rawQuery(
-            """SELECT conversation, COUNT(*), MAX(ts), body, outgoing,
-                (SELECT sender FROM messages p WHERE p.conversation=m.conversation AND p.outgoing=0
-                 ORDER BY p.ts DESC LIMIT 1)
-               FROM messages m GROUP BY conversation ORDER BY MAX(ts) DESC""",
+            """SELECT g.conversation, g.n, m.ts, m.body, m.outgoing,
+                (SELECT sender FROM messages p WHERE p.conversation=g.conversation AND p.outgoing=0
+                 ORDER BY p.seq DESC, p.id DESC LIMIT 1)
+               FROM (SELECT conversation, COUNT(*) n,
+                       (SELECT id FROM messages l WHERE l.conversation=o.conversation
+                        ORDER BY l.seq DESC, l.id DESC LIMIT 1) last
+                     FROM messages o GROUP BY conversation) g
+               JOIN messages m ON m.id=g.last
+               ORDER BY m.seq DESC, m.id DESC""",
             null,
         ).use { c ->
             val out = ArrayList<Conversation>(c.count)
@@ -130,7 +234,7 @@ class MessageStore private constructor(context: Context) :
     }
 
     fun messages(conversation: String): List<Message> =
-        query("WHERE conversation=? ORDER BY ts, id", arrayOf(conversation))
+        query("WHERE conversation=? ORDER BY seq, id", arrayOf(conversation))
 
     fun search(term: String): List<Message> {
         val escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
@@ -147,7 +251,7 @@ class MessageStore private constructor(context: Context) :
             json.setIndent(" ")
             json.beginArray()
             readableDatabase.rawQuery(
-                "SELECT conversation, sender, outgoing, body, ts, source FROM messages ORDER BY conversation, ts, id",
+                "SELECT conversation, sender, outgoing, body, ts, source FROM messages ORDER BY conversation, seq, id",
                 null,
             ).use { c ->
                 while (c.moveToNext()) {
@@ -191,6 +295,7 @@ class MessageStore private constructor(context: Context) :
 
     companion object {
         private const val NOTIFICATION_MATCH_DAYS = 7L
+        private const val ONE_MINUTE_MS = 60_000.0
 
         @Volatile
         private var instance: MessageStore? = null

@@ -96,6 +96,7 @@ class MainActivity : Activity() {
             LinearLayout.LayoutParams(-1, 0, 1f),
         )
         setContentView(root)
+        matchSystemBars(colors)
     }
 
     override fun onResume() {

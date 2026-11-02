@@ -47,6 +47,7 @@ class ConversationActivity : Activity() {
             LinearLayout.LayoutParams(-1, 0, 1f),
         )
         setContentView(root)
+        matchSystemBars(colors)
     }
 
     private fun header(peer: String?) = LinearLayout(this).apply {

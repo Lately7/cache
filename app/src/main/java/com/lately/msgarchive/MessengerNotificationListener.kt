@@ -28,6 +28,8 @@ class MessengerNotificationListener : NotificationListenerService() {
 
         val store = MessageStore.get(this)
         if (styled.isNullOrEmpty()) {
+            // Without message data this may be a missed call or an app prompt rather than a chat.
+            if (notification.category != Notification.CATEGORY_MESSAGE) return
             val text = extras.getCharSequence(Notification.EXTRA_TEXT)?.toString() ?: return
             save(store, conversation, conversation, false, text, sbn.postTime)
             return

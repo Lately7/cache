@@ -1,11 +1,13 @@
 package com.lately.msgarchive
 
+import android.app.Activity
 import android.content.Context
 import android.content.res.Configuration
 import android.graphics.Outline
 import android.graphics.drawable.GradientDrawable
 import android.view.View
 import android.view.ViewOutlineProvider
+import android.view.WindowInsetsController
 import android.widget.ImageView
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -15,7 +17,7 @@ fun Context.dp(value: Int) = (value * resources.displayMetrics.density).toInt()
 
 /** Messenger's colours; the framework theme has no bubble colours to borrow. */
 class Palette(context: Context) {
-    private val dark =
+    val dark =
         context.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK == Configuration.UI_MODE_NIGHT_YES
 
     val background = if (dark) 0xFF000000.toInt() else 0xFFFFFFFF.toInt()
@@ -25,6 +27,13 @@ class Palette(context: Context) {
     val bubbleIn = if (dark) 0xFF303030.toInt() else 0xFFE4E6EB.toInt()
     val bubbleOut = 0xFF0084FF.toInt()
     val onBubbleOut = 0xFFFFFFFF.toInt()
+}
+
+/** The framework theme keeps light status bar icons even on our white background, hiding them. */
+fun Activity.matchSystemBars(colors: Palette) {
+    val light = WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS or
+        WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS
+    window.insetsController?.setSystemBarsAppearance(if (colors.dark) 0 else light, light)
 }
 
 fun Context.avatarView(sizeDp: Int) = ImageView(this).apply {
