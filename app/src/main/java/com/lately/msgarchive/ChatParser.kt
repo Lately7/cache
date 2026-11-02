@@ -48,7 +48,10 @@ object ChatParser {
     // Messenger's accessibility label for a bubble: "Sender, text, double tap to see ...".
     private val BUBBLE = Regex("""^([^,]+), (.*), double tap to see sent/receive date and time.*$""", options)
     private val PROFILE = Regex("""^Open (.+)'s profile$""", RegexOption.IGNORE_CASE)
-    private val TITLE_SUFFIX = Regex(""",\s*Thread details$""", RegexOption.IGNORE_CASE)
+    private val TITLE_SUFFIX = Regex(
+        """(,\s*(active|đang hoạt động|hoạt động)\b[^,]*)?,\s*Thread details$""",
+        RegexOption.IGNORE_CASE,
+    )
 
     private val NOISE = listOf(
         PROFILE,
@@ -71,6 +74,7 @@ object ChatParser {
         ),
     )
     private const val MAX_MEDIA_LABEL = 60
+    private const val HEADER_SHARE = 0.13
 
     /** A short label on a bubble too tall for one line of text is an attachment; files are recognised by name alone. */
     fun mediaKind(text: String, node: ScreenNode, width: Int): String? {
@@ -87,22 +91,39 @@ object ChatParser {
     fun parseMarked(text: String): MarkedBubble? =
         BUBBLE.matchEntire(text.trim())?.let { MarkedBubble(it.groupValues[1].trim(), it.groupValues[2].trim()) }
 
-    /** Returns null unless this looks like an open chat; a composer box is what separates it from the chat list. */
-    fun parse(nodes: List<ScreenNode>, width: Int, height: Int): ScreenChat? {
-        // The keyboard pushes the composer up to mid-screen; the chat list's search box stays near the top.
-        val composer = nodes.filter { it.editable && it.top > height * 0.3 }.maxByOrNull { it.top } ?: return null
-        val headerBottom = (height * 0.13).toInt()
-
-        val title = nodes
-            .filter { !it.editable && it.bottom <= headerBottom && it.left > width * 0.08 && !isNoise(it.text) }
+    private fun titleNode(nodes: List<ScreenNode>, width: Int, height: Int): ScreenNode? {
+        val top = nodes.filter { !it.editable && it.bottom <= height * 0.3 }
+        // "Thread details" names the header outright; position is only a guess, used when it is missing.
+        top.firstOrNull { TITLE_SUFFIX.containsMatchIn(it.text.trim()) }?.let { return it }
+        return top
+            .filter { it.bottom <= height * HEADER_SHARE && it.left > width * 0.08 && !isNoise(it.text) }
             .minWithOrNull(compareBy({ it.top }, { it.left }))
-            ?.text?.let(::cleanTitle)?.takeIf { it.isNotBlank() } ?: return null
+    }
 
-        val body = nodes
-            .filter { !it.editable && it.top >= headerBottom && it.bottom <= composer.top }
-            .sortedWith(compareBy({ it.top }, { it.left }))
+    /** Returns null unless this looks like an open chat: a composer box or a labelled bubble tells it from the chat list. */
+    fun parse(nodes: List<ScreenNode>, width: Int, height: Int): ScreenChat? {
         // The label is only present in some Messenger languages; without it, fall back to layout alone.
-        val labelled = body.any { parseMarked(it.text) != null }
+        val labelled = nodes.any { !it.editable && parseMarked(it.text) != null }
+        // The keyboard pushes the composer up to mid-screen; the chat list's search box stays near the top.
+        val composer = nodes.filter { it.editable && it.top > height * 0.3 }.maxByOrNull { it.top }
+        // Message requests and blocked chats have no composer but are still chats.
+        if (composer == null && !labelled) return null
+        val composerTop = composer?.top ?: height
+
+        val header = titleNode(nodes, width, height)
+        // A sender is a weaker name than the title, but a wrong name beats losing the screen.
+        val title = header?.text?.let(::cleanTitle)?.takeIf { it.isNotBlank() }
+            ?: nodes.firstNotNullOfOrNull { node -> parseMarked(node.text)?.sender?.takeIf { node.left < width - node.right } }
+            ?: return null
+
+        // Tall bubbles are clipped by the list, so they can poke above the usual header line or into the composer.
+        val headerBottom = if (labelled) header?.bottom ?: 0 else (height * HEADER_SHARE).toInt()
+        val body = nodes
+            .filter { node ->
+                !node.editable && node.top >= headerBottom &&
+                    (if (labelled) node.top < composerTop else node.bottom <= composerTop)
+            }
+            .sortedWith(compareBy({ it.top }, { it.left }))
 
         val ordered = ArrayList<ScreenMessage>()
         val orderedNodes = ArrayList<ScreenNode>()
@@ -126,8 +147,9 @@ object ChatParser {
             if (prev != null && prev.text == node.text && node.top < prev.bottom) continue
             val leftGap = node.left
             val rightGap = width - node.right
-            // Centred lines are system notices ("X đã đặt biệt danh..."), not messages.
-            if (kotlin.math.abs(leftGap - rightGap) < width * 0.03) continue
+            // Centred lines are system notices ("X đã đặt biệt danh..."), not messages. A long labelled
+            // bubble can be just as centred, and the label proves it is a message.
+            if (marked == null && kotlin.math.abs(leftGap - rightGap) < width * 0.03) continue
             val outgoing = rightGap < leftGap
             val sender = if (outgoing) null else marked?.sender ?: title
             val text = marked?.text ?: node.text.trim()

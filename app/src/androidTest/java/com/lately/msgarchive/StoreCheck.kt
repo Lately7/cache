@@ -56,6 +56,37 @@ class StoreCheck : Instrumentation() {
         val last = store.conversations().single()
         if (last.lastBody != "ok" || last.count != 11) failures.add("summary: $last")
 
+        // An old notification's "ok" must not swallow a later "ok" said with the chat open.
+        store.deleteAll()
+        store.insert(Message(chat, "B", false, "ok", base, "notification"), "n2")
+        screen(base + 1000, "a" to "ok", "ok" to "b", "b" to "c")
+        expect("notification stands for its bubble", listOf("ok", "b", "c"))
+        screen(base + 2000, "b" to "c", "c" to "ok", "ok" to "d")
+        expect("later ok is saved", listOf("ok", "b", "c", "ok", "d"))
+        screen(base + 3000, "b" to "c", "c" to "ok", "ok" to "d")
+        expect("re-read of claimed row adds nothing", listOf("ok", "b", "c", "ok", "d"))
+        screen(base + 4000, "a" to "ok", "ok" to "b")
+        expect("claimed row is still recognised", listOf("ok", "b", "c", "ok", "d"))
+
+        // The same two lines said again must be saved, and only once.
+        store.deleteAll()
+        screen(base, "x" to "1", "1" to "2")
+        screen(base + 1000, "x" to "1", "1" to "2", "2" to "m", "m" to "n")
+        expect("before the repeat", listOf("1", "2", "m", "n"))
+        screen(base + 2000, "m" to "n", "n" to "1", "1" to "2")
+        expect("repeated pair is new", listOf("1", "2", "m", "n", "1", "2"))
+        screen(base + 3000, "m" to "n", "n" to "1", "1" to "2")
+        screen(base + 4000, "n" to "1", "1" to "2")
+        expect("repeated pair reread", listOf("1", "2", "m", "n", "1", "2"))
+        screen(base + 5000, "n" to "1", "1" to "2", "2" to "z")
+        expect("message after repeat goes last", listOf("1", "2", "m", "n", "1", "2", "z"))
+
+        store.deleteAll()
+        screen(base, "x" to "1", "1" to "2", "2" to "1", "1" to "2")
+        expect("pair twice on one screen", listOf("1", "2", "1", "2"))
+        screen(base + 1000, "x" to "1", "1" to "2", "2" to "1", "1" to "2")
+        expect("pair twice reread", listOf("1", "2", "1", "2"))
+
         // Hostile text must survive storage and search unchanged.
         store.deleteAll()
         val hostile = listOf("'; DROP TABLE messages;--", "100%", "a_b", "back\\slash", "😀‮gnp.exe", "dòng\nmới", "x".repeat(200_000))

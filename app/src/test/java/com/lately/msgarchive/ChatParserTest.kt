@@ -148,9 +148,9 @@ class ChatParserTest {
     }
 
     @Test
-    fun blankChatTitleIsIgnored() {
+    fun blankChatTitleFallsBackToTheSender() {
         val nodes = listOf(ScreenNode(", Thread details", 200, 80, 600, 150), composer, incoming("Hien, a$suffix", 400))
-        assertNull(ChatParser.parse(nodes, width, height))
+        assertEquals("Hien", ChatParser.parse(nodes, width, height)!!.conversation)
     }
 
     @Test(timeout = 2000)
@@ -171,6 +171,48 @@ class ChatParserTest {
     fun chatListSearchBoxIsNotAComposer() {
         val searchBox = ScreenNode("Search", 40, 200, 1040, 300, editable = true)
         assertNull(ChatParser.parse(listOf(title, searchBox, incoming("hi", 500)), width, height))
+    }
+
+    @Test
+    fun longLabelledBubbleInTheMiddleOfTheScreenIsKept() {
+        val long = ScreenNode("Hien, một tin rất dài$suffix", 130, 550, 950, 900)
+        val nodes = listOf(title, composer, incoming("Hien, đầu$suffix", 400), long)
+        assertEquals(listOf("một tin rất dài"), ChatParser.parse(nodes, width, height)!!.messages.map { it.text })
+    }
+
+    @Test
+    fun chatWithoutComposerStillSaves() {
+        val header = ScreenNode("Long Vu, Thread details", 200, 80, 600, 150)
+        val nodes = listOf(header, incoming("Hien, đầu$suffix", 400), incoming("Hien, chào$suffix", 550))
+        val chat = ChatParser.parse(nodes, width, height)!!
+        assertEquals("Long Vu", chat.conversation)
+        assertEquals(listOf("chào"), chat.messages.map { it.text })
+    }
+
+    @Test
+    fun threadDetailsWinsOverAnythingHigherInTheHeader() {
+        val call = ScreenNode("Start audio call", 800, 60, 900, 140)
+        val header = ScreenNode("Long Vu, Active 5m ago, Thread details", 200, 80, 600, 150)
+        val nodes = listOf(call, header, composer, incoming("Hien, đầu$suffix", 400), incoming("Hien, chào$suffix", 550))
+        assertEquals("Long Vu", ChatParser.parse(nodes, width, height)!!.conversation)
+    }
+
+    @Test
+    fun missingTitleFallsBackToTheSender() {
+        val nodes = listOf(composer, incoming("Hien, đầu$suffix", 400), incoming("Hien, chào$suffix", 550))
+        assertEquals("Hien", ChatParser.parse(nodes, width, height)!!.conversation)
+    }
+
+    @Test
+    fun bubbleReachingUnderTheComposerOrHeaderIsKept() {
+        val header = ScreenNode("Long Vu, Thread details", 200, 80, 600, 150)
+        val nodes = listOf(
+            header,
+            composer,
+            ScreenNode("Hien, đầu$suffix", 130, 160, 700, 400),
+            ScreenNode("Hien, cuối$suffix", 130, 2100, 700, 2250),
+        )
+        assertEquals(listOf("cuối"), ChatParser.parse(nodes, width, height)!!.messages.map { it.text })
     }
 
     @Test

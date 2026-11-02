@@ -2,6 +2,7 @@ package com.lately.msgarchive
 
 import android.app.Notification
 import android.app.Person
+import android.content.ComponentName
 import android.graphics.drawable.Icon
 import android.net.Uri
 import android.os.Build
@@ -12,11 +13,26 @@ import android.service.notification.StatusBarNotification
 
 class MessengerNotificationListener : NotificationListenerService() {
 
+    /** Messages that arrived while the process was dead are still in the shade. */
+    override fun onListenerConnected() {
+        try {
+            activeNotifications?.forEach { onNotificationPosted(it) }
+        } catch (e: RuntimeException) {
+            Diagnostics.record(this, e)
+        }
+    }
+
+    /** Vendor cleaners can drop the connection without turning the permission off, and it may not come back alone. */
+    override fun onListenerDisconnected() {
+        requestRebind(ComponentName(this, MessengerNotificationListener::class.java))
+    }
+
     override fun onNotificationPosted(sbn: StatusBarNotification) {
         if (sbn.packageName != MESSENGER_PACKAGE || Settings.isPaused(this)) return
         // Extras are another app's data; a malformed one must not take the listener down.
         try {
             handle(sbn)
+            Settings.noteNotification(this)
         } catch (e: RuntimeException) {
             Diagnostics.record(this, e)
         }

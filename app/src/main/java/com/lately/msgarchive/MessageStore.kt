@@ -2,6 +2,7 @@ package com.lately.msgarchive
 
 import android.content.ContentValues
 import android.content.Context
+import android.database.Cursor
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
 import android.util.JsonWriter
@@ -19,6 +20,8 @@ data class Message(
     val media: String? = null,
 )
 
+data class SavedScreen(val ids: Map<ScreenMessage, Long>, val added: Int)
+
 data class Conversation(
     val name: String,
     val count: Int,
@@ -29,7 +32,7 @@ data class Conversation(
 )
 
 class MessageStore private constructor(context: Context) :
-    SQLiteOpenHelper(context, "archive.db", null, 4) {
+    SQLiteOpenHelper(context, "archive.db", null, 5) {
 
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL(
@@ -44,9 +47,11 @@ class MessageStore private constructor(context: Context) :
                 source TEXT NOT NULL,
                 dedupe_key TEXT NOT NULL UNIQUE,
                 kind TEXT,
-                media TEXT)""",
+                media TEXT,
+                screen_key TEXT)""",
         )
         db.execSQL("CREATE INDEX idx_conv_seq ON messages(conversation, seq)")
+        db.execSQL("CREATE INDEX idx_screen_key ON messages(screen_key)")
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
@@ -60,6 +65,10 @@ class MessageStore private constructor(context: Context) :
         if (oldVersion < 4) {
             db.execSQL("ALTER TABLE messages ADD COLUMN kind TEXT")
             db.execSQL("ALTER TABLE messages ADD COLUMN media TEXT")
+        }
+        if (oldVersion < 5) {
+            db.execSQL("ALTER TABLE messages ADD COLUMN screen_key TEXT")
+            db.execSQL("CREATE INDEX idx_screen_key ON messages(screen_key)")
         }
     }
 
@@ -100,39 +109,68 @@ class MessageStore private constructor(context: Context) :
         }
     }
 
-    private class Known(val seq: Double, val ts: Long)
+    private class Known(val id: Long, val seq: Double, val ts: Long)
 
-    private fun known(conversation: String, item: ScreenMessage, now: Long): Known? {
-        val db = readableDatabase
-        db.rawQuery(
-            "SELECT seq, ts FROM messages WHERE dedupe_key=?",
-            arrayOf(ChatParser.screenKey(conversation, item)),
-        ).use { if (it.moveToFirst()) return Known(it.getDouble(0), it.getLong(1)) }
-        // A message usually arrives as a notification first, then shows up again when the chat is opened.
+    private fun Cursor.toKnown() = Known(getLong(0), getDouble(1), getLong(2))
+
+    /** Rows already stored under this bubble's identity, newest first; a repeat of it adds a numbered key. */
+    private fun occurrences(key: String): List<Known> {
+        readableDatabase.rawQuery(
+            """SELECT id, seq, ts FROM messages WHERE dedupe_key=? OR screen_key=?
+               OR (dedupe_key>? AND dedupe_key<?) ORDER BY seq DESC, id DESC""",
+            arrayOf(key, key, key + REPEAT_MARK, key + (REPEAT_MARK + 1)),
+        ).use { c ->
+            val out = ArrayList<Known>(c.count)
+            while (c.moveToNext()) out.add(c.toKnown())
+            return out
+        }
+    }
+
+    /**
+     * A message usually arrives as a notification first, then shows up again when the chat is opened.
+     * Each notification row can only stand for one bubble, and only one placed after the bubble above,
+     * or a later "ok" would be taken for an old notification's "ok" and never saved.
+     */
+    private fun claimNotification(
+        conversation: String,
+        item: ScreenMessage,
+        key: String,
+        above: Double?,
+        now: Long,
+    ): Known? {
         val since = now - TimeUnit.DAYS.toMillis(NOTIFICATION_MATCH_DAYS)
-        db.rawQuery(
-            """SELECT seq, ts FROM messages WHERE conversation=? AND body=? AND outgoing=?
-               AND source='notification' AND ts>=? ORDER BY seq DESC LIMIT 1""",
-            arrayOf(conversation, item.text, if (item.outgoing) "1" else "0", since.toString()),
-        ).use { if (it.moveToFirst()) return Known(it.getDouble(0), it.getLong(1)) }
-        return null
+        val order = if (above == null) "DESC" else "ASC"
+        // Screen rows are stamped when read, a moment after the send time a notification carries.
+        val floor = if (above == null) -Double.MAX_VALUE else above - ONE_MINUTE_MS
+        readableDatabase.rawQuery(
+            """SELECT id, seq, ts FROM messages WHERE conversation=? AND body=? AND outgoing=?
+               AND source='notification' AND screen_key IS NULL AND ts>=? AND seq>?
+               ORDER BY seq $order LIMIT 1""",
+            arrayOf(conversation, item.text, if (item.outgoing) "1" else "0", since.toString(), floor.toString()),
+        ).use { c ->
+            if (!c.moveToFirst()) return null
+            val row = c.toKnown()
+            val values = ContentValues().apply { put("screen_key", key) }
+            writableDatabase.update("messages", values, "id=?", arrayOf(row.id.toString()))
+            return row
+        }
     }
 
     private fun neighbour(conversation: String, sql: String, seq: Double): Known? {
         readableDatabase.rawQuery(sql, arrayOf(conversation, seq.toString())).use {
-            return if (it.moveToFirst()) Known(it.getDouble(0), it.getLong(1)) else null
+            return if (it.moveToFirst()) it.toKnown() else null
         }
     }
 
     private fun after(conversation: String, seq: Double) = neighbour(
         conversation,
-        "SELECT seq, ts FROM messages WHERE conversation=? AND seq>? ORDER BY seq LIMIT 1",
+        "SELECT id, seq, ts FROM messages WHERE conversation=? AND seq>? ORDER BY seq LIMIT 1",
         seq,
     )
 
     private fun before(conversation: String, seq: Double) = neighbour(
         conversation,
-        "SELECT seq, ts FROM messages WHERE conversation=? AND seq<? ORDER BY seq DESC LIMIT 1",
+        "SELECT id, seq, ts FROM messages WHERE conversation=? AND seq<? ORDER BY seq DESC LIMIT 1",
         seq,
     )
 
@@ -147,13 +185,38 @@ class MessageStore private constructor(context: Context) :
      * Saves what is on screen in chat order. Scrolling back reveals older messages after newer ones
      * were stored, so new bubbles are placed relative to the known bubbles around them. Their real
      * send time is not on screen: a scrolled-back message takes the time of the message after it.
+     * Returns the row of every bubble on screen, and how many were new.
      */
-    fun saveScreen(chat: ScreenChat, now: Long) {
+    fun saveScreen(chat: ScreenChat, now: Long): SavedScreen {
         val conversation = chat.conversation
         val items = chat.messages
         writableDatabase.beginTransaction()
         try {
-            val found = items.map { known(conversation, it, now) }
+            val keys = ArrayList<String>(items.size)
+            val found = ArrayList<Known?>(items.size)
+            val used = HashSet<Long>()
+            val planned = HashMap<String, Int>()
+            var above: Double? = null
+            for (item in items) {
+                val key = ChatParser.screenKey(conversation, item)
+                val rows = occurrences(key)
+                var match = rows.firstOrNull { it.id !in used }
+                // The same two lines can be said again later. Right after a new bubble, a row older than
+                // the bubbles above is that repeat rather than a re-read, so it must not hide the message.
+                val mark = above
+                if (match != null && mark != null && found.lastOrNull() == null && match.seq <= mark) match = null
+                if (rows.isEmpty()) match = claimNotification(conversation, item, key, above, now)
+                found.add(match)
+                if (match != null) {
+                    keys.add(key)
+                    used.add(match.id)
+                    above = match.seq
+                } else {
+                    val occurrence = rows.size + (planned[key] ?: 0)
+                    keys.add(if (occurrence == 0) key else key + REPEAT_MARK + occurrence)
+                    planned[key] = (planned[key] ?: 0) + 1
+                }
+            }
             var start = 0
             while (start < items.size) {
                 if (found[start] != null) {
@@ -162,10 +225,20 @@ class MessageStore private constructor(context: Context) :
                 }
                 var end = start
                 while (end < items.size && found[end] == null) end++
-                saveRun(conversation, items.subList(start, end), found.getOrNull(start - 1), found.getOrNull(end), now)
+                saveRun(
+                    conversation,
+                    items.subList(start, end),
+                    keys.subList(start, end),
+                    found.getOrNull(start - 1),
+                    found.getOrNull(end),
+                    now,
+                )
                 start = end
             }
             writableDatabase.setTransactionSuccessful()
+            val ids = HashMap<ScreenMessage, Long>()
+            items.forEachIndexed { i, item -> (found[i]?.id ?: idForKey(keys[i]))?.let { ids[item] = it } }
+            return SavedScreen(ids, found.count { it == null })
         } finally {
             writableDatabase.endTransaction()
         }
@@ -174,6 +247,7 @@ class MessageStore private constructor(context: Context) :
     private fun saveRun(
         conversation: String,
         run: List<ScreenMessage>,
+        keys: List<String>,
         lower: Known?,
         visibleUpper: Known?,
         now: Long,
@@ -195,7 +269,7 @@ class MessageStore private constructor(context: Context) :
         }
         run.forEachIndexed { i, item ->
             val message = Message(conversation, item.sender, item.outgoing, item.text, time, "screen", item.kind)
-            insert(message, ChatParser.screenKey(conversation, item), seqs[i])
+            insert(message, keys[i], seqs[i])
         }
     }
 
@@ -205,9 +279,9 @@ class MessageStore private constructor(context: Context) :
         }
     }
 
-    fun idMissingMedia(key: String): Long? {
-        readableDatabase.rawQuery("SELECT id FROM messages WHERE dedupe_key=? AND media IS NULL", arrayOf(key)).use {
-            return if (it.moveToFirst()) it.getLong(0) else null
+    fun missingMedia(id: Long): Boolean {
+        readableDatabase.rawQuery("SELECT 1 FROM messages WHERE id=? AND media IS NULL", arrayOf(id.toString())).use {
+            return it.moveToFirst()
         }
     }
 
@@ -329,6 +403,7 @@ class MessageStore private constructor(context: Context) :
     companion object {
         private const val NOTIFICATION_MATCH_DAYS = 7L
         private const val ONE_MINUTE_MS = 60_000.0
+        private const val REPEAT_MARK = '\u0003'
 
         @Volatile
         private var instance: MessageStore? = null

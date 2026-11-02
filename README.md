@@ -26,6 +26,18 @@ màn hình chỉ dùng để cắt avatar rồi bỏ, không lưu lại. Chưa c
 Khi cập nhật từ bản 0.1, dữ liệu cũ được giữ và tự làm sạch. Nếu avatar không hiện, tắt rồi bật
 lại Trợ năng để app nhận quyền chụp màn hình.
 
+## Khi không lưu được tin
+
+Vào ⚙ và đọc dòng trạng thái:
+
+| Dòng trạng thái | Ý nghĩa |
+|---|---|
+| Trợ năng: tắt, hoặc bật nhưng không chạy | Hệ thống đã tắt dịch vụ. Tắt rồi bật lại Trợ năng và cho app chạy nền |
+| Lần đọc màn hình cuối: chưa có | Dịch vụ chưa từng đọc được Messenger |
+| Không đọc được cửa sổ Messenger | Messenger đang hiện nhưng hệ thống không cho đọc cửa sổ |
+| Không phải màn hình chat | Messenger đổi giao diện; dùng Ghi cấu trúc màn hình rồi gửi kết quả |
+| Tên chat: thấy N tin, 0 tin mới | App đọc được, các tin đó đã có sẵn |
+
 ## Cài trên iQOO Z10 Turbo Pro
 
 1. Chép `app-debug.apk` sang điện thoại và mở để cài (cho phép cài từ nguồn này).

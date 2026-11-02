@@ -12,6 +12,7 @@ import android.graphics.Rect
 import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.SystemClock
 import android.view.Display
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
@@ -22,13 +23,26 @@ class MessengerAccessibilityService : AccessibilityService() {
     private val worker = HandlerThread("capture").apply { start() }
     private val handler = Handler(worker.looper)
     private val executor = Executor { handler.post(it) }
-    private val scan = Runnable { guarded { scanWindow() } }
+    private val scan = Runnable {
+        deadline = 0L
+        guarded { scanWindow() }
+    }
+
+    @Volatile
+    private var deadline = 0L
+
+    // Leaving Messenger always ends in a failed read, which must not replace the useful result before it.
+    private var windowRead = false
+    private var chatRead = false
 
     override fun onAccessibilityEvent(event: AccessibilityEvent) {
         if (event.packageName?.toString() != MESSENGER_PACKAGE) return
-        // Messenger fires events continuously while rendering; wait for the screen to settle.
+        // Messenger fires events while rendering, so wait for the screen to settle. A typing bubble or
+        // a GIF never settles, and waiting without a limit would mean never saving that chat.
+        val now = SystemClock.uptimeMillis()
+        if (deadline == 0L) deadline = now + MAX_WAIT_MS
         handler.removeCallbacks(scan)
-        handler.postDelayed(scan, SETTLE_DELAY_MS)
+        handler.postAtTime(scan, minOf(now + SETTLE_DELAY_MS, deadline))
     }
 
     /**
@@ -37,6 +51,8 @@ class MessengerAccessibilityService : AccessibilityService() {
      */
     override fun onServiceConnected() {
         super.onServiceConnected()
+        connected = true
+        Settings.noteCapture(this, "Dịch vụ Trợ năng vừa chạy, chưa thấy Messenger")
         guarded { goForeground() }
     }
 
@@ -68,6 +84,7 @@ class MessengerAccessibilityService : AccessibilityService() {
     override fun onInterrupt() = Unit
 
     override fun onDestroy() {
+        connected = false
         handler.removeCallbacks(scan)
         worker.quitSafely()
         super.onDestroy()
@@ -84,20 +101,30 @@ class MessengerAccessibilityService : AccessibilityService() {
 
     private fun scanWindow() {
         if (Settings.isPaused(this)) return
-        val root = rootInActiveWindow ?: return
-        if (root.packageName?.toString() != MESSENGER_PACKAGE) return
+        val root = messengerRoot()
+        if (root == null) {
+            if (!windowRead) Settings.noteCapture(this, "Không đọc được cửa sổ Messenger")
+            return
+        }
+        windowRead = true
 
         val nodes = ArrayList<ScreenNode>()
         collect(root, nodes, 0)
         if (Settings.consumeDumpRequest(this)) Diagnostics.writeDump(this, nodes)
         val metrics = resources.displayMetrics
-        val chat = ChatParser.parse(nodes, metrics.widthPixels, metrics.heightPixels) ?: return
+        val chat = ChatParser.parse(nodes, metrics.widthPixels, metrics.heightPixels)
+        if (chat == null) {
+            if (!chatRead) Settings.noteCapture(this, "Không phải màn hình chat (${nodes.size} mục)")
+            return
+        }
 
+        chatRead = true
         val store = MessageStore.get(this)
-        store.saveScreen(chat, System.currentTimeMillis())
+        val saved = store.saveScreen(chat, System.currentTimeMillis())
+        Settings.noteCapture(this, "${chat.conversation}: thấy ${chat.messages.size} tin, ${saved.added} tin mới")
 
         val media = chat.media.mapNotNull { item ->
-            store.idMissingMedia(ChatParser.screenKey(chat.conversation, item.message))?.let { it to item.node }
+            saved.ids[item.message]?.takeIf(store::missingMedia)?.let { it to item.node }
         }
         // A clipped avatar is no longer square and would be saved stretched.
         val avatars = chat.avatars
@@ -105,6 +132,15 @@ class MessengerAccessibilityService : AccessibilityService() {
             .distinctBy { it.owner }
             .filterNot { AvatarStore.has(this, it.owner) }
         if (media.isNotEmpty() || avatars.isNotEmpty()) capture(media, avatars)
+    }
+
+    /** Chat heads and split screen leave Messenger on screen without being the active window. */
+    private fun messengerRoot(): AccessibilityNodeInfo? {
+        val active = rootInActiveWindow
+        if (active?.packageName?.toString() == MESSENGER_PACKAGE) return active
+        return windows.firstNotNullOfOrNull { window ->
+            window.root?.takeIf { it.packageName?.toString() == MESSENGER_PACKAGE }
+        }
     }
 
     /** Nothing exposes these images directly, so they are cropped from a screenshot that is never stored. */
@@ -170,10 +206,16 @@ class MessengerAccessibilityService : AccessibilityService() {
         }
     }
 
-    private companion object {
-        const val CHANNEL = "capture"
-        const val NOTIFICATION_ID = 1
-        const val SETTLE_DELAY_MS = 800L
-        const val MAX_DEPTH = 40
+    companion object {
+        private const val CHANNEL = "capture"
+        private const val NOTIFICATION_ID = 1
+        private const val SETTLE_DELAY_MS = 500L
+        private const val MAX_WAIT_MS = 1500L
+        private const val MAX_DEPTH = 40
+
+        /** The settings toggle can stay on after a vendor cleaner has killed the service. */
+        @Volatile
+        var connected = false
+            private set
     }
 }

@@ -27,6 +27,9 @@ import android.widget.ListView
 import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 class MainActivity : Activity() {
     private lateinit var store: MessageStore
@@ -208,8 +211,19 @@ class MainActivity : Activity() {
         }
         panelStatus.text = buildString {
             append("Thông báo: ").append(if (notifications) "bật" else "tắt")
-            append(" · Trợ năng: ").append(if (accessibility) "bật" else "tắt")
+            append(" · Trợ năng: ").append(
+                when {
+                    !accessibility -> "tắt"
+                    MessengerAccessibilityService.connected -> "bật"
+                    else -> "bật nhưng không chạy, hãy tắt rồi bật lại"
+                },
+            )
             append(" · ").append(rows.sumOf { it.count }).append(" tin đã lưu")
+            val capture = Settings.lastCapture(this@MainActivity)
+            append("\nLần đọc màn hình cuối: ")
+            append(if (capture == null) "chưa có" else "${stamp(Settings.lastCaptureAt(this@MainActivity))}, $capture")
+            val notified = Settings.lastNotificationAt(this@MainActivity)
+            append("\nThông báo Messenger cuối: ").append(if (notified == 0L) "chưa có" else stamp(notified))
         }
 
         val term = search.text.toString().trim()
@@ -222,6 +236,8 @@ class MainActivity : Activity() {
         empty.visibility = if (adapter.rows.isEmpty()) View.VISIBLE else View.GONE
         empty.text = if (term.isEmpty()) "Chưa có tin nào. Mở một đoạn chat trong Messenger để bắt đầu lưu." else "Không tìm thấy tin nào."
     }
+
+    private fun stamp(time: Long) = SimpleDateFormat("HH:mm:ss dd/MM", Locale.getDefault()).format(Date(time))
 
     private fun isListenerEnabled(): Boolean {
         val enabled = SystemSettings.Secure.getString(contentResolver, "enabled_notification_listeners").orEmpty()
