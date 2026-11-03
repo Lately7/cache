@@ -8,7 +8,9 @@ import android.app.PendingIntent
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.graphics.Bitmap
+import android.graphics.Point
 import android.graphics.Rect
+import android.hardware.display.DisplayManager
 import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
@@ -35,8 +37,24 @@ class MessengerAccessibilityService : AccessibilityService() {
     private var windowRead = false
     private var chatRead = false
 
+    // Same-name chats are told apart once, on opening; scrolling back must not look like a new person.
+    private var openChat: Pair<String, String>? = null
+
+    @Volatile
+    private var windowChanged = false
+
+    @Volatile
+    private var scrolled = false
+
+    private var lastSeen = emptySet<String>()
+    private var capturePending = false
+
     override fun onAccessibilityEvent(event: AccessibilityEvent) {
         if (event.packageName?.toString() != MESSENGER_PACKAGE) return
+        when (event.eventType) {
+            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> windowChanged = true
+            AccessibilityEvent.TYPE_VIEW_SCROLLED -> scrolled = true
+        }
         // Messenger fires events while rendering, so wait for the screen to settle. A typing bubble or
         // a GIF never settles, and waiting without a limit would mean never saving that chat.
         val now = SystemClock.uptimeMillis()
@@ -99,7 +117,7 @@ class MessengerAccessibilityService : AccessibilityService() {
         }
     }
 
-    private fun scanWindow() {
+    private fun scanWindow(settled: Boolean = false) {
         if (Settings.isPaused(this)) return
         val root = messengerRoot()
         if (root == null) {
@@ -112,26 +130,55 @@ class MessengerAccessibilityService : AccessibilityService() {
         collect(root, nodes, 0)
         if (Settings.consumeDumpRequest(this)) Diagnostics.writeDump(this, nodes)
         val metrics = resources.displayMetrics
-        val chat = ChatParser.parse(nodes, metrics.widthPixels, metrics.heightPixels)
-        if (chat == null) {
+        val parsed = ChatParser.parse(nodes, metrics.widthPixels, metrics.heightPixels)
+        if (parsed == null) {
+            openChat = null
+            lastSeen = emptySet()
             if (!chatRead) Settings.noteCapture(this, "Không phải màn hình chat (${nodes.size} mục)")
             return
         }
 
         chatRead = true
         val store = MessageStore.get(this)
-        val saved = store.saveScreen(chat, System.currentTimeMillis())
+        val now = System.currentTimeMillis()
+        val title = parsed.conversation
+        val seen = parsed.messages.map { it.previousText + "" + it.text }.toSet()
+        // The window event can arrive after the first read, so a screen replaced without scrolling also counts.
+        val jumped = !scrolled && seen.isNotEmpty() && lastSeen.isNotEmpty() && seen.none { it in lastSeen }
+        scrolled = false
+        val opened = openChat?.takeIf { it.first == title && !windowChanged && !jumped }?.second
+        val thread = opened ?: store.resolveConversation(parsed, now)
+        if (parsed.messages.isNotEmpty()) {
+            openChat = title to thread
+            windowChanged = false
+            lastSeen = seen
+        }
+        val chat = parsed.copy(conversation = thread)
+        val saved = store.saveScreen(chat, now)
         Settings.noteCapture(this, "${chat.conversation}: thấy ${chat.messages.size} tin, ${saved.added} tin mới")
 
         val media = chat.media.mapNotNull { item ->
             saved.ids[item.message]?.takeIf(store::missingMedia)?.let { it to item.node }
         }
         // A clipped avatar is no longer square and would be saved stretched.
+        val oneToOne = store.isOneToOne(thread)
         val avatars = chat.avatars
             .filter { it.node.right - it.node.left > 0 && it.node.right - it.node.left == it.node.bottom - it.node.top }
+            // Namesakes can share a sender name, so a private chat's avatar belongs to the chat.
+            .map { if (oneToOne) it.copy(owner = thread) else it }
             .distinctBy { it.owner }
             .filterNot { AvatarStore.has(this, it.owner) }
-        if (media.isNotEmpty() || avatars.isNotEmpty()) capture(media, avatars)
+        if (media.isEmpty() && avatars.isEmpty()) return
+        if (settled) {
+            capture(media, avatars)
+        } else if (!capturePending) {
+            // Pixels are still sliding during the opening animation, so look again once it has finished.
+            capturePending = true
+            handler.postDelayed({
+                capturePending = false
+                guarded { scanWindow(settled = true) }
+            }, CAPTURE_DELAY_MS)
+        }
     }
 
     /** Chat heads and split screen leave Messenger on screen without being the active window. */
@@ -152,12 +199,16 @@ class MessengerAccessibilityService : AccessibilityService() {
                     ?.copy(Bitmap.Config.ARGB_8888, false)
                 buffer.close()
                 // The user may have switched apps since the scan; never crop another app's screen.
-                val stillMessenger = rootInActiveWindow?.packageName?.toString() == MESSENGER_PACKAGE
-                if (shot != null && stillMessenger) {
-                    avatars.forEach { avatar ->
-                        crop(shot, avatar.node)?.let { AvatarStore.save(this@MessengerAccessibilityService, avatar.owner, it) }
+                val root = rootInActiveWindow?.takeIf { it.packageName?.toString() == MESSENGER_PACKAGE }
+                if (shot != null && root != null) {
+                    // The picture was taken after the scan; a list that moved meanwhile would crop the wrong spot.
+                    val current = ArrayList<ScreenNode>().also { collect(root, it, 0) }.toSet()
+                    avatars.filter { it.node in current }.forEach { avatar ->
+                        crop(shot, avatar.node)?.takeIf(::isAvatar)?.let {
+                            AvatarStore.save(this@MessengerAccessibilityService, avatar.owner, it)
+                        }
                     }
-                    media.forEach { (id, node) ->
+                    media.filter { it.second in current }.forEach { (id, node) ->
                         crop(shot, node)?.let { MediaStoreFiles.save(this@MessengerAccessibilityService, id, it) }
                     }
                 }
@@ -173,11 +224,24 @@ class MessengerAccessibilityService : AccessibilityService() {
         }
     }
 
+    private fun isAvatar(crop: Bitmap): Boolean {
+        val w = crop.width
+        val h = crop.height
+        val corners = listOf(crop.getPixel(0, 0), crop.getPixel(w - 1, 0), crop.getPixel(0, h - 1), crop.getPixel(w - 1, h - 1))
+        val inner = listOf(2, 3, 4).flatMap { y -> listOf(2, 3, 4).map { x -> crop.getPixel(w * x / 6, h * y / 6) } }
+        return ChatParser.looksLikeAvatar(corners, inner)
+    }
+
     private fun crop(shot: Bitmap, node: ScreenNode): Bitmap? {
-        val left = node.left.coerceAtLeast(0)
-        val top = node.top.coerceAtLeast(0)
-        val width = minOf(node.right, shot.width) - left
-        val height = minOf(node.bottom, shot.height) - top
+        // Phones that render below panel resolution report nodes and screenshots at different sizes.
+        val size = Point()
+        @Suppress("DEPRECATION")
+        getSystemService(DisplayManager::class.java).getDisplay(Display.DEFAULT_DISPLAY).getRealSize(size)
+        val scale = if (size.x > 0) shot.width.toFloat() / size.x else 1f
+        val left = (node.left * scale).toInt().coerceAtLeast(0)
+        val top = (node.top * scale).toInt().coerceAtLeast(0)
+        val width = minOf((node.right * scale).toInt(), shot.width) - left
+        val height = minOf((node.bottom * scale).toInt(), shot.height) - top
         if (width <= 0 || height <= 0) return null
         return Bitmap.createBitmap(shot, left, top, width, height)
     }
@@ -211,6 +275,7 @@ class MessengerAccessibilityService : AccessibilityService() {
         private const val NOTIFICATION_ID = 1
         private const val SETTLE_DELAY_MS = 500L
         private const val MAX_WAIT_MS = 1500L
+        private const val CAPTURE_DELAY_MS = 1000L
         private const val MAX_DEPTH = 40
 
         /** The settings toggle can stay on after a vendor cleaner has killed the service. */

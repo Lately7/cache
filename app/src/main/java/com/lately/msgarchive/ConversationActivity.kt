@@ -19,6 +19,7 @@ import java.util.concurrent.TimeUnit
 class ConversationActivity : Activity() {
     private lateinit var colors: Palette
     private lateinit var name: String
+    private var oneToOne = true
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -28,7 +29,9 @@ class ConversationActivity : Activity() {
             return
         }
         colors = Palette(this)
-        val messages = MessageStore.get(this).messages(name)
+        val store = MessageStore.get(this)
+        val messages = store.messages(name)
+        oneToOne = store.isOneToOne(name)
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -121,7 +124,8 @@ class ConversationActivity : Activity() {
         private fun joins(position: Int, other: Int): Boolean {
             val a = messages.getOrNull(position) ?: return false
             val b = messages.getOrNull(other) ?: return false
-            return a.outgoing == b.outgoing && a.sender == b.sender && !startsNewBlock(maxOf(position, other))
+            val samePerson = a.sender == b.sender || oneToOne
+            return a.outgoing == b.outgoing && samePerson && !startsNewBlock(maxOf(position, other))
         }
 
         override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
@@ -143,11 +147,12 @@ class ConversationActivity : Activity() {
                 else -> View.VISIBLE
             }
             if (holder.avatar.visibility == View.VISIBLE) {
-                holder.avatar.setImageBitmap(AvatarStore.load(this@ConversationActivity, message.sender, name))
+                val person = if (oneToOne) arrayOf(name, message.sender) else arrayOf(message.sender, name)
+                holder.avatar.setImageBitmap(AvatarStore.load(this@ConversationActivity, *person))
             }
 
             // Only group chats need names: in a one-to-one chat the title already says who it is.
-            val showName = !message.outgoing && !joinsAbove && message.sender != null && message.sender != name
+            val showName = !oneToOne && !message.outgoing && !joinsAbove && message.sender != null && message.sender != name
             holder.senderName.visibility = if (showName) View.VISIBLE else View.GONE
             holder.senderName.text = message.sender
 

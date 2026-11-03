@@ -8,6 +8,7 @@ object Settings {
     private const val PREFS = "settings"
     private const val KEY_PAUSED = "paused"
     private const val KEY_DUMP = "dump_requested"
+    private const val KEY_AVATARS_CHECKED = "avatars_checked"
     private const val KEY_CAPTURE = "last_capture"
     private const val KEY_CAPTURE_AT = "last_capture_at"
     private const val KEY_NOTIFICATION_AT = "last_notification_at"
@@ -37,6 +38,13 @@ object Settings {
     }
 
     fun lastNotificationAt(context: Context) = prefs(context).getLong(KEY_NOTIFICATION_AT, 0L)
+
+    /** True once: avatars cropped before 0.4.1 can be misaligned and cannot be told from good ones. */
+    fun firstRunWithCheckedAvatars(context: Context): Boolean {
+        if (prefs(context).getBoolean(KEY_AVATARS_CHECKED, false)) return false
+        prefs(context).edit().putBoolean(KEY_AVATARS_CHECKED, true).apply()
+        return true
+    }
 
     fun requestDump(context: Context) {
         prefs(context).edit().putBoolean(KEY_DUMP, true).apply()

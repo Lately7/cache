@@ -75,6 +75,9 @@ object ChatParser {
     )
     private const val MAX_MEDIA_LABEL = 60
     private const val HEADER_SHARE = 0.13
+    private const val AVATAR_CORNER_GAP = 40
+    private const val AVATAR_MIN_CONTRAST = 40
+    private const val AVATAR_MIN_DETAIL = 24
 
     /** A short label on a bubble too tall for one line of text is an attachment; files are recognised by name alone. */
     fun mediaKind(text: String, node: ScreenNode, width: Int): String? {
@@ -83,6 +86,34 @@ object ChatParser {
         val tall = node.bottom - node.top >= width * 0.2
         return kind.takeIf { tall || it == KIND_FILE }
     }
+
+    /**
+     * A circular avatar on a plain background has four matching corners and a varied middle. Anything
+     * else is a crop of the wrong spot or Messenger's grey placeholder, and is better left unsaved.
+     */
+    fun looksLikeAvatar(corners: List<Int>, inner: List<Int>): Boolean {
+        val ring = corners.first()
+        if (corners.any { colourGap(it, ring) > AVATAR_CORNER_GAP }) return false
+        val apart = inner.maxOf { colourGap(it, ring) }
+        val varied = inner.maxOf { colourGap(it, inner.first()) }
+        return apart > AVATAR_MIN_CONTRAST && varied > AVATAR_MIN_DETAIL
+    }
+
+    private fun colourGap(a: Int, b: Int) = listOf(16, 8, 0).maxOf { shift ->
+        kotlin.math.abs((a shr shift and 0xFF) - (b shr shift and 0xFF))
+    }
+
+    /** Messenger exposes no thread id on screen, so a second chat with the same title gets a numbered name. */
+    fun threadName(title: String, number: Int) = if (number <= 1) title else "$title ($number)"
+
+    fun threadNumber(title: String, name: String): Int? {
+        if (name == title) return 1
+        if (!name.startsWith("$title (") || !name.endsWith(")")) return null
+        return name.substring(title.length + 2, name.length - 1).toIntOrNull()?.takeIf { it > 1 }
+    }
+
+    fun isGroup(messages: List<ScreenMessage>) =
+        messages.filterNot { it.outgoing }.mapNotNull { it.sender }.distinct().size > 1
 
     fun isNoise(text: String) =text.isBlank() || NOISE.any { it.matches(text.trim()) }
 

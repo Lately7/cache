@@ -94,6 +94,10 @@ class MainActivity : Activity() {
             ListView(this).apply {
                 adapter = this@MainActivity.adapter
                 divider = null
+                setOnItemLongClickListener { _, _, position, _ ->
+                    confirmDeleteChat(this@MainActivity.adapter.getItem(position).conversation)
+                    true
+                }
                 setOnItemClickListener { _, _, position, _ ->
                     val row = this@MainActivity.adapter.getItem(position)
                     startActivity(
@@ -297,6 +301,20 @@ class MainActivity : Activity() {
             .setPositiveButton("Xoá") { _, _ ->
                 store.deleteAll()
                 MediaStoreFiles.deleteAll(this)
+                AvatarStore.deleteAll(this)
+                refresh()
+            }
+            .setNegativeButton("Huỷ", null)
+            .show()
+    }
+
+    private fun confirmDeleteChat(conversation: String) {
+        AlertDialog.Builder(this)
+            .setTitle("Xoá đoạn chat \"$conversation\"?")
+            .setMessage("Không thể hoàn tác. Mở lại đoạn chat trong Messenger thì app lưu lại những tin còn hiện trên màn hình.")
+            .setPositiveButton("Xoá") { _, _ ->
+                MediaStoreFiles.delete(this, store.deleteConversation(conversation))
+                AvatarStore.delete(this, conversation)
                 refresh()
             }
             .setNegativeButton("Huỷ", null)

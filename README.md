@@ -18,7 +18,13 @@ màn hình để lấy nhãn thật. Tin thu từ màn hình mang giờ lúc app
 được, không phải giờ gửi gốc; tin cũ tìm thấy khi cuộn lên được xếp đúng thứ tự và mượn giờ của
 tin ngay sau nó. Cuộn từ từ để luôn còn tin đã lưu trên màn hình, vì cuộn quá nhanh sẽ làm app
 không biết đoạn mới nằm ở đâu. Bong bóng trên cùng màn hình chỉ được lưu khi cuộn lên thấy tin
-phía trước nó. Hai đoạn chat trùng tên sẽ bị gộp làm một.
+phía trước nó.
+
+Messenger không cho biết mã đoạn chat trên màn hình, nên hai người trùng tên được phân biệt như sau:
+lúc mở đoạn chat, nếu tin đang hiện chưa có trong đoạn cùng tên nào thì app tạo đoạn mới tên
+"Tên (2)". Vì vậy một đoạn chat có quá nhiều tin mới mà không có thông báo nào cũng có thể bị tách.
+Đoạn đã lỡ gộp từ bản cũ không tách lại được: nhấn giữ đoạn đó trong danh sách để xoá, rồi mở lại
+từng người trong Messenger.
 
 Avatar lấy từ ảnh trong thông báo, hoặc cắt từ màn hình khi thấy avatar trong đoạn chat. Ảnh chụp
 màn hình chỉ dùng để cắt avatar rồi bỏ, không lưu lại. Chưa có avatar thì hiện chữ cái đầu.

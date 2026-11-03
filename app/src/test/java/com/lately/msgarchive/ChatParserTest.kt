@@ -215,6 +215,35 @@ class ChatParserTest {
         assertEquals(listOf("cuối"), ChatParser.parse(nodes, width, height)!!.messages.map { it.text })
     }
 
+    private val black = 0xFF000000.toInt()
+    private val face = listOf(0xFFC08060.toInt(), 0xFF302010.toInt(), 0xFF804020.toInt())
+
+    @Test
+    fun circleOnPlainBackgroundIsAnAvatar() {
+        assertEquals(true, ChatParser.looksLikeAvatar(List(4) { black }, face))
+    }
+
+    @Test
+    fun cropThatMissedTheCircleIsRejected() {
+        val shifted = listOf(black, 0xFFC08060.toInt(), black, 0xFF804020.toInt())
+        assertEquals(false, ChatParser.looksLikeAvatar(shifted, face))
+    }
+
+    @Test
+    fun loadingPlaceholderIsRejected() {
+        assertEquals(false, ChatParser.looksLikeAvatar(List(4) { black }, List(9) { 0xFF2A2030.toInt() }))
+    }
+
+    @Test
+    fun numberedThreadsBelongToTheirTitle() {
+        assertEquals("Lan", ChatParser.threadName("Lan", 1))
+        assertEquals("Lan (2)", ChatParser.threadName("Lan", 2))
+        assertEquals(1, ChatParser.threadNumber("Lan", "Lan"))
+        assertEquals(3, ChatParser.threadNumber("Lan", "Lan (3)"))
+        assertNull(ChatParser.threadNumber("Lan", "Lan (bạn)"))
+        assertNull(ChatParser.threadNumber("Lan", "Lan Anh"))
+    }
+
     @Test
     fun scrolledBackMessagesFitBetweenTheirNeighbours() {
         assertEquals(listOf(11.0, 12.0, 13.0), ChatParser.between(10.0, 14.0, 3))

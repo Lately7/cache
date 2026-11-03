@@ -46,13 +46,14 @@ class MessengerNotificationListener : NotificationListenerService() {
 
         val extras = notification.extras
         val styled = extras.getParcelableArrayCompat(Notification.EXTRA_MESSAGES)
-        val conversation = extras.getCharSequence(Notification.EXTRA_CONVERSATION_TITLE)?.toString()
+        val title = extras.getCharSequence(Notification.EXTRA_CONVERSATION_TITLE)?.toString()
             ?: extras.getCharSequence(Notification.EXTRA_TITLE)?.toString()
             ?: return
 
+        val store = MessageStore.get(this)
+        val conversation = store.threadForNotification(title, notification.shortcutId)
         saveAvatar(conversation, notification.getLargeIcon())
 
-        val store = MessageStore.get(this)
         if (styled.isNullOrEmpty()) {
             // Without message data this may be a missed call or an app prompt rather than a chat.
             if (notification.category != Notification.CATEGORY_MESSAGE) return

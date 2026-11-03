@@ -74,6 +74,10 @@ object MediaStoreFiles {
         return BitmapFactory.decodeFile(path, BitmapFactory.Options().apply { inSampleSize = sample })
     }
 
+    fun delete(context: Context, names: List<String>) {
+        names.forEach { File(folder(context), it).delete() }
+    }
+
     fun deleteAll(context: Context) {
         folder(context).deleteRecursively()
     }

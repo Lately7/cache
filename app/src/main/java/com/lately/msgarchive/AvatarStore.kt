@@ -26,6 +26,16 @@ object AvatarStore {
 
     fun has(context: Context, name: String) = file(context, name).exists()
 
+    fun delete(context: Context, name: String) {
+        file(context, name).delete()
+        cache.remove(name)
+    }
+
+    fun deleteAll(context: Context) {
+        File(context.filesDir, "avatars").deleteRecursively()
+        cache.evictAll()
+    }
+
     fun save(context: Context, name: String, bitmap: Bitmap) {
         val target = file(context, name)
         target.parentFile?.mkdirs()

@@ -87,6 +87,49 @@ class StoreCheck : Instrumentation() {
         screen(base + 1000, "x" to "1", "1" to "2", "2" to "1", "1" to "2")
         expect("pair twice reread", listOf("1", "2", "1", "2"))
 
+        // The screen's order wins over stamps: a late read must not sort after the reply to it.
+        store.deleteAll()
+        store.insert(Message(chat, "B", false, "reply", base + 100, "notification"), "n3")
+        screen(base + 200, "x" to "said")
+        screen(base + 300, "x" to "said", "said" to "reply", "reply" to "next")
+        expect("late read keeps screen order", listOf("said", "reply", "next"))
+        screen(base + 400, "x" to "said", "said" to "reply", "reply" to "next")
+        expect("order is stable", listOf("said", "reply", "next"))
+
+        // An old stretch containing a line that repeats later must stay where it is.
+        store.deleteAll()
+        screen(base, "x" to "1", "1" to "2", "2" to "m", "m" to "n")
+        screen(base + 1000, "m" to "n", "n" to "1", "1" to "2")
+        screen(base + 2000, "1" to "2", "2" to "m")
+        expect("old stretch is not reordered", listOf("1", "2", "m", "n", "1", "2"))
+
+        // Namesakes: the first chat keeps the title, an unseen one gets a number, re-opening finds its own.
+        store.deleteAll()
+        fun chatOf(vararg lines: Pair<String, String>) =
+            ScreenChat("Lan", lines.map { (previous, text) -> ScreenMessage(text, false, previous, "Lan") })
+        val first = chatOf("a" to "b", "b" to "c")
+        val second = chatOf("p" to "q", "q" to "r")
+        if (store.resolveConversation(first, base) != "Lan") failures.add("first namesake")
+        store.saveScreen(first, base)
+        val other = store.resolveConversation(second, base + 1000)
+        if (other != "Lan (2)") failures.add("second namesake: $other")
+        store.saveScreen(second.copy(conversation = other), base + 1000)
+        if (store.resolveConversation(first, base + 2000) != "Lan") failures.add("first reopened")
+        if (store.resolveConversation(second, base + 2000) != "Lan (2)") failures.add("second reopened")
+        val busy = ScreenChat("Lan", listOf(ScreenMessage("u", false, "t", "A"), ScreenMessage("v", false, "u", "B")))
+        if (store.resolveConversation(busy, base + 3000) != "Lan") failures.add("group split")
+
+        store.deleteAll()
+        val one = store.threadForNotification("Lan", "s1")
+        store.insert(Message(one, one, false, "m1", base, "notification"), "s1a")
+        val two = store.threadForNotification("Lan", "s2")
+        store.insert(Message(two, two, false, "m2", base, "notification"), "s2a")
+        if (one != "Lan" || two != "Lan (2)") failures.add("notification threads: $one, $two")
+        if (store.threadForNotification("Lan", "s1") != "Lan") failures.add("notification thread not stable")
+        if (store.threadForNotification("Khác", "s1") != "Khác") failures.add("thread id leaked across titles")
+        store.deleteConversation("Lan (2)")
+        if (store.conversations().map { it.name } != listOf("Lan")) failures.add("delete one chat")
+
         // Hostile text must survive storage and search unchanged.
         store.deleteAll()
         val hostile = listOf("'; DROP TABLE messages;--", "100%", "a_b", "back\\slash", "😀‮gnp.exe", "dòng\nmới", "x".repeat(200_000))

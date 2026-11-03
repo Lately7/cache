@@ -32,7 +32,7 @@ data class Conversation(
 )
 
 class MessageStore private constructor(context: Context) :
-    SQLiteOpenHelper(context, "archive.db", null, 5) {
+    SQLiteOpenHelper(context, "archive.db", null, 6) {
 
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL(
@@ -52,6 +52,17 @@ class MessageStore private constructor(context: Context) :
         )
         db.execSQL("CREATE INDEX idx_conv_seq ON messages(conversation, seq)")
         db.execSQL("CREATE INDEX idx_screen_key ON messages(screen_key)")
+        createThreads(db)
+    }
+
+    private fun createThreads(db: SQLiteDatabase) {
+        db.execSQL(
+            """CREATE TABLE threads(
+                title TEXT NOT NULL,
+                shortcut TEXT NOT NULL,
+                conversation TEXT NOT NULL,
+                PRIMARY KEY(title, shortcut))""",
+        )
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
@@ -70,6 +81,7 @@ class MessageStore private constructor(context: Context) :
             db.execSQL("ALTER TABLE messages ADD COLUMN screen_key TEXT")
             db.execSQL("CREATE INDEX idx_screen_key ON messages(screen_key)")
         }
+        if (oldVersion < 6) createThreads(db)
     }
 
     private class OldRow(val id: Long, val conversation: String, val outgoing: Boolean, val body: String)
@@ -197,13 +209,19 @@ class MessageStore private constructor(context: Context) :
             val used = HashSet<Long>()
             val planned = HashMap<String, Int>()
             var above: Double? = null
-            for (item in items) {
+            items.forEachIndexed { index, item ->
                 val key = ChatParser.screenKey(conversation, item)
                 val rows = occurrences(key)
-                var match = rows.firstOrNull { it.id !in used }
+                val free = rows.filter { it.id !in used }
+                val mark = above
+                var match = if (mark != null) {
+                    free.lastOrNull { it.seq > mark } ?: free.firstOrNull()
+                } else {
+                    val next = items.getOrNull(index + 1)?.let { occurrences(ChatParser.screenKey(conversation, it)) }.orEmpty()
+                    free.firstOrNull { row -> next.any { it.seq > row.seq } } ?: free.firstOrNull()
+                }
                 // The same two lines can be said again later. Right after a new bubble, a row older than
                 // the bubbles above is that repeat rather than a re-read, so it must not hide the message.
-                val mark = above
                 if (match != null && mark != null && found.lastOrNull() == null && match.seq <= mark) match = null
                 if (rows.isEmpty()) match = claimNotification(conversation, item, key, above, now)
                 found.add(match)
@@ -235,13 +253,124 @@ class MessageStore private constructor(context: Context) :
                 )
                 start = end
             }
-            writableDatabase.setTransactionSuccessful()
             val ids = HashMap<ScreenMessage, Long>()
-            items.forEachIndexed { i, item -> (found[i]?.id ?: idForKey(keys[i]))?.let { ids[item] = it } }
+            val visible = ArrayList<Long>(items.size)
+            items.forEachIndexed { i, item ->
+                (found[i]?.id ?: idForKey(keys[i]))?.let {
+                    ids[item] = it
+                    visible.add(it)
+                }
+            }
+            keepScreenOrder(conversation, visible)
+            writableDatabase.setTransactionSuccessful()
             return SavedScreen(ids, found.count { it == null })
         } finally {
             writableDatabase.endTransaction()
         }
+    }
+
+    private fun seqOf(id: Long): Double {
+        readableDatabase.rawQuery("SELECT seq FROM messages WHERE id=?", arrayOf(id.toString())).use {
+            return if (it.moveToFirst()) it.getDouble(0) else 0.0
+        }
+    }
+
+    /**
+     * Rows are stamped when read, while notification rows carry the send time, so a message read late
+     * can sort after a reply to it. The screen shows the true order; rows that disagree move to match.
+     */
+    private fun keepScreenOrder(conversation: String, visible: List<Long>) {
+        if (visible.isEmpty()) return
+        val onScreen = visible.joinToString(",")
+        var previous = seqOf(visible.first())
+        for (id in visible.drop(1)) {
+            val seq = seqOf(id)
+            if (seq > previous) {
+                previous = seq
+                continue
+            }
+            val ceiling = readableDatabase.rawQuery(
+                "SELECT MIN(seq) FROM messages WHERE conversation=? AND seq>? AND id NOT IN ($onScreen)",
+                arrayOf(conversation, previous.toString()),
+            ).use { if (it.moveToFirst() && !it.isNull(0)) it.getDouble(0) else null }
+            val moved = if (ceiling == null) previous + 1 else maxOf((previous + ceiling) / 2, Math.nextUp(previous))
+            val values = ContentValues().apply { put("seq", moved) }
+            writableDatabase.update("messages", values, "id=?", arrayOf(id.toString()))
+            previous = moved
+        }
+    }
+
+    private fun threadsNamed(title: String): List<String> {
+        readableDatabase.rawQuery(
+            "SELECT DISTINCT conversation FROM messages WHERE conversation=? OR (conversation>=? AND conversation<?)",
+            arrayOf(title, "$title (", "$title )"),
+        ).use { c ->
+            val out = ArrayList<String>()
+            while (c.moveToNext()) out.add(c.getString(0))
+            return out.filter { ChatParser.threadNumber(title, it) != null }
+                .sortedBy { ChatParser.threadNumber(title, it) }
+        }
+    }
+
+    private fun nextThread(title: String, taken: List<String>): String {
+        val last = taken.maxOfOrNull { ChatParser.threadNumber(title, it) ?: 1 } ?: 0
+        return ChatParser.threadName(title, last + 1)
+    }
+
+    private fun overlap(conversation: String, chat: ScreenChat, now: Long): Int {
+        val since = now - TimeUnit.DAYS.toMillis(NOTIFICATION_MATCH_DAYS)
+        return chat.messages.count { item ->
+            occurrences(ChatParser.screenKey(conversation, item)).isNotEmpty() ||
+                readableDatabase.rawQuery(
+                    """SELECT 1 FROM messages WHERE conversation=? AND body=? AND outgoing=?
+                       AND source='notification' AND screen_key IS NULL AND ts>=? LIMIT 1""",
+                    arrayOf(conversation, item.text, if (item.outgoing) "1" else "0", since.toString()),
+                ).use { it.moveToFirst() }
+        }
+    }
+
+    /**
+     * Picks which chat a screen belongs to when it is opened. Two people can share a name, and the only
+     * clue is that the newest bubbles of a chat already seen are stored there. No match means another
+     * person, except in a group: several senders under one title is one busy chat, not a namesake.
+     */
+    fun resolveConversation(chat: ScreenChat, now: Long): String {
+        val title = chat.conversation
+        val known = threadsNamed(title)
+        if (known.isEmpty() || chat.messages.isEmpty()) return known.firstOrNull() ?: title
+        val best = known.map { it to overlap(it, chat, now) }.maxBy { it.second }
+        if (best.second > 0) return best.first
+        return if (ChatParser.isGroup(chat.messages)) known.first() else nextThread(title, known)
+    }
+
+    /** Notifications do carry a per-chat id, so namesakes stay apart even before either chat is opened. */
+    fun threadForNotification(title: String, shortcut: String?): String {
+        if (shortcut == null) return threadsNamed(title).firstOrNull() ?: title
+        readableDatabase.rawQuery(
+            "SELECT conversation FROM threads WHERE title=? AND shortcut=?",
+            arrayOf(title, shortcut),
+        ).use { if (it.moveToFirst()) return it.getString(0) }
+        val linked = ArrayList<String>()
+        readableDatabase.rawQuery("SELECT conversation FROM threads WHERE title=?", arrayOf(title)).use { c ->
+            while (c.moveToNext()) linked.add(c.getString(0))
+        }
+        val known = threadsNamed(title)
+        val conversation = known.firstOrNull { it !in linked } ?: nextThread(title, known + linked)
+        val values = ContentValues().apply {
+            put("title", title)
+            put("shortcut", shortcut)
+            put("conversation", conversation)
+        }
+        writableDatabase.insertWithOnConflict("threads", null, values, SQLiteDatabase.CONFLICT_IGNORE)
+        return conversation
+    }
+
+    /** One-to-one chats show a nickname on bubbles and the full name in notifications; both are one person. */
+    fun isOneToOne(conversation: String): Boolean {
+        readableDatabase.rawQuery(
+            "SELECT COUNT(DISTINCT sender) FROM messages WHERE conversation=? AND outgoing=0 AND sender<>?",
+            arrayOf(conversation, conversation),
+        ).use { return !it.moveToFirst() || it.getInt(0) <= 1 }
     }
 
     private fun saveRun(
@@ -346,6 +475,21 @@ class MessageStore private constructor(context: Context) :
 
     fun deleteAll() {
         writableDatabase.delete("messages", null, null)
+        writableDatabase.delete("threads", null, null)
+    }
+
+    /** Returns the attached files, which the caller removes from storage. */
+    fun deleteConversation(conversation: String): List<String> {
+        val files = ArrayList<String>()
+        readableDatabase.rawQuery(
+            "SELECT media FROM messages WHERE conversation=? AND media IS NOT NULL",
+            arrayOf(conversation),
+        ).use { c ->
+            while (c.moveToNext()) files.add(c.getString(0))
+        }
+        writableDatabase.delete("messages", "conversation=?", arrayOf(conversation))
+        writableDatabase.delete("threads", "conversation=?", arrayOf(conversation))
+        return files
     }
 
     fun exportJson(out: Writer): Int {

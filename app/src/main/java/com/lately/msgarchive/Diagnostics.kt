@@ -40,6 +40,7 @@ object Diagnostics {
 class App : Application() {
     override fun onCreate() {
         super.onCreate()
+        if (Settings.firstRunWithCheckedAvatars(this)) AvatarStore.deleteAll(this)
         val previous = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { thread, error ->
             Diagnostics.record(this, error)
