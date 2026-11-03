@@ -52,8 +52,9 @@ có kèm tệp. Còn lại app lưu tên tệp, không có nội dung tệp.
 
 ## Zalo
 
-Tin Zalo hiện được lưu từ thông báo, nên chỉ có tin nhận khi Zalo có hiện thông báo. Tin đã gửi và đọc
-từ màn hình chưa hoạt động với Zalo.
+Tin Zalo được lưu từ thông báo và từ màn hình khi mở đoạn chat. Zalo không cho biết ai gửi tin, nên
+app đo bong bóng lệch trái hay phải trên ảnh chụp màn hình rồi bỏ ảnh, không lưu lại. Trong nhóm, tên
+người gửi có thể nằm lẫn ở đầu nội dung tin. Ảnh Zalo mới chỉ được ghi nhận là có ảnh, chưa lưu hình.
 
 ## Khi không lưu được tin
 

@@ -36,6 +36,11 @@ data class ScreenChat(
 
 data class MarkedBubble(val sender: String, val text: String)
 
+/** Zalo exposes each message as a full-width row, so its side can only be measured on a screenshot. */
+data class ZaloRow(val text: String, val node: ScreenNode, val kind: String?)
+
+data class ZaloScreen(val title: String, val rows: List<ZaloRow>)
+
 /**
  * Turns a flat node list into chat messages. Kept free of Android types so it can be
  * unit-tested: Messenger exposes no stable view ids, so labels and layout are the only signals.
@@ -84,6 +89,7 @@ object ChatParser {
     private const val AVATAR_MIN_DETAIL = 24
     private const val SAME_FACE_GAP = 40
     private const val MIN_BUBBLE_SHARE = 0.07
+    private val ZALO_TIME = Regex("""\s*\d{1,2}:\d{2}$""")
     private val LINK = Regex(
         """https?://\S+|www\.\S+|\b[\w-]+(\.[\w-]+)*\.(com|net|org|vn|io|me|co|gg|tv|dev|app)\b(/\S*)?""",
         RegexOption.IGNORE_CASE,
@@ -109,7 +115,7 @@ object ChatParser {
         return apart > AVATAR_MIN_CONTRAST && varied > AVATAR_MIN_DETAIL
     }
 
-    private fun colourGap(a: Int, b: Int) = listOf(16, 8, 0).maxOf { shift ->
+    fun colourGap(a: Int, b: Int) = listOf(16, 8, 0).maxOf { shift ->
         kotlin.math.abs((a shr shift and 0xFF) - (b shr shift and 0xFF))
     }
 
@@ -120,6 +126,52 @@ object ChatParser {
         if (name == title) return 1
         if (!name.startsWith("$title (") || !name.endsWith(")")) return null
         return name.substring(title.length + 2, name.length - 1).toIntOrNull()?.takeIf { it > 1 }
+    }
+
+    fun parseZalo(nodes: List<ScreenNode>, width: Int, height: Int): ZaloScreen? {
+        val composer = nodes.filter { it.editable && it.top > height * 0.3 }.maxByOrNull { it.top } ?: return null
+        val header = nodes
+            .filter { it.className.endsWith("TextView") && it.bottom <= height * HEADER_SHARE && it.left > width * 0.08 }
+            .minByOrNull { it.top } ?: return null
+        val title = header.text.trim().takeIf { it.isNotEmpty() } ?: return null
+        val full = { node: ScreenNode -> node.left <= width * 0.02 && node.right >= width * 0.98 }
+        // The pinned message floats over the list and hides whatever row is behind it.
+        val covers = nodes.filter { it.className.endsWith("FrameLayout") && !it.editable && it.text.isNotBlank() }
+        val rows = nodes
+            .filter { it.className.endsWith("ViewGroup") && full(it) && it.top >= header.bottom && it.bottom <= composer.top }
+            .filterNot { row -> covers.any { it.top < row.bottom && it.bottom > row.top } }
+            .sortedBy { it.top }
+            .mapNotNull { node ->
+                val text = node.text.replace(ZALO_TIME, "").trim()
+                val tall = node.bottom - node.top >= width * 0.2
+                when {
+                    text.isNotEmpty() -> ZaloRow(text, node, mediaKind(text, node, width))
+                    tall -> ZaloRow("Ảnh", node, KIND_IMAGE)
+                    else -> null
+                }
+            }
+        return ZaloScreen(title, rows)
+    }
+
+    /** True for the owner's message, false for someone else's, null for a centred system line. */
+    fun zaloSide(left: Int, right: Int, width: Int): Boolean? = when {
+        right <= left -> null
+        left < width * 0.15 -> false
+        right > width * 0.9 -> true
+        else -> null
+    }
+
+    /** The top row has no predecessor yet, as in Messenger, so its identity waits until it has one. */
+    fun zaloChat(title: String, rows: List<ZaloRow>, sides: List<Boolean?>): ScreenChat {
+        val kept = rows.indices.mapNotNull { i -> sides[i]?.let { rows[i] to it } }
+        var repeats = 0
+        val messages = kept.drop(1).mapIndexed { i, (row, outgoing) ->
+            val previous = kept[i].first.text
+            repeats = if (row.text == previous) repeats + 1 else 0
+            val before = if (repeats > 1) "$previous\u0002$repeats" else previous
+            ScreenMessage(row.text, outgoing, before, if (outgoing) null else title, row.kind)
+        }
+        return ScreenChat(title, messages)
     }
 
     /** Mean colour distance between two same-size avatar samples; a person's picture stays close to itself. */

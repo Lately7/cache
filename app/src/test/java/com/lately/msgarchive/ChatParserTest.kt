@@ -347,6 +347,56 @@ class ChatParserTest {
         assertEquals(null, ChatParser.findLink("javascript:alert(1)"))
     }
 
+    private fun zaloNode(text: String, top: Int, bottom: Int) =
+        ScreenNode(text, 0, top, 1260, bottom, className = "android.view.ViewGroup")
+
+    private val zaloChat = listOf(
+        ScreenNode("Nhom Ban", 173, 132, 758, 198, className = "android.widget.TextView"),
+        ScreenNode("51 members", 173, 198, 375, 247, className = "android.widget.TextView"),
+        zaloNode("bi che boi tin ghim 23:07", 263, 443),
+        zaloNode("dong dau 23:07", 443, 685),
+        zaloNode("toi gui", 685, 897),
+        zaloNode("Mai da them Lan vao nhom", 897, 1059),
+        zaloNode("nguoi khac 23:08", 1059, 1272),
+        zaloNode("23:09", 1272, 1405),
+        ScreenNode("Tin ghim", 12, 275, 1248, 440, className = "android.widget.FrameLayout"),
+        ScreenNode("Tin nhan", 142, 2505, 811, 2653, editable = true, className = "android.widget.EditText"),
+    )
+
+    @Test
+    fun zaloRowsLoseTheirTimeAndThePinnedRow() {
+        val screen = ChatParser.parseZalo(zaloChat, 1260, 2800)!!
+        assertEquals("Nhom Ban", screen.title)
+        assertEquals(listOf("dong dau", "toi gui", "Mai da them Lan vao nhom", "nguoi khac"), screen.rows.map { it.text })
+    }
+
+    @Test
+    fun zaloSidesMatchWhatARealChatMeasured() {
+        assertEquals(false, ChatParser.zaloSide(78, 990, 1260))
+        assertEquals(false, ChatParser.zaloSide(144, 1026, 1260))
+        assertEquals(true, ChatParser.zaloSide(354, 1206, 1260))
+        assertEquals(true, ChatParser.zaloSide(786, 1206, 1260))
+        assertNull(ChatParser.zaloSide(400, 860, 1260))
+    }
+
+    @Test
+    fun zaloSystemLinesAreDroppedAndOrderKept() {
+        val screen = ChatParser.parseZalo(zaloChat, 1260, 2800)!!
+        val chat = ChatParser.zaloChat(screen.title, screen.rows, listOf(false, true, null, false))
+        assertEquals(
+            listOf(
+                ScreenMessage("toi gui", true, "dong dau", null),
+                ScreenMessage("nguoi khac", false, "toi gui", "Nhom Ban"),
+            ),
+            chat.messages,
+        )
+    }
+
+    @Test
+    fun zaloListHasNoComposerSoItIsNotAChat() {
+        assertNull(ChatParser.parseZalo(zaloChat.filterNot { it.editable }, 1260, 2800))
+    }
+
     @Test
     fun scrolledBackMessagesFitBetweenTheirNeighbours() {
         assertEquals(listOf(11.0, 12.0, 13.0), ChatParser.between(10.0, 14.0, 3))

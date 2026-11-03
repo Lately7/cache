@@ -55,6 +55,7 @@ class MessengerAccessibilityService : AccessibilityService() {
     @Volatile
     private var leftApp = false
     private var capturePending = false
+    private var zaloShown: String? = null
 
     // A chat is only trusted once its title and bubbles have held still; the two load separately.
     private var entry: String? = null
@@ -154,13 +155,12 @@ class MessengerAccessibilityService : AccessibilityService() {
 
         val nodes = ArrayList<ScreenNode>()
         collect(root, nodes, 0)
-        if (source == Source.ZALO) {
-            Diagnostics.writeZaloDump(this, nodes)
-            Settings.noteCapture(this, "Zalo: thấy ${nodes.size} mục trên màn hình, chưa đọc tin từ màn hình")
-            return
-        }
         if (Settings.consumeDumpRequest(this)) Diagnostics.writeDump(this, nodes)
         val metrics = resources.displayMetrics
+        if (source == Source.ZALO) {
+            scanZalo(nodes, metrics.widthPixels, metrics.heightPixels, settled)
+            return
+        }
         val parsed = ChatParser.parse(nodes, metrics.widthPixels, metrics.heightPixels)
         if (parsed == null) {
             openChat = null
@@ -170,6 +170,76 @@ class MessengerAccessibilityService : AccessibilityService() {
         }
 
         chatRead = true
+        saveParsed(parsed, source, settled)
+    }
+
+    /** Zalo's rows say nothing about who sent them, so the bubble's side is measured once the screen is still. */
+    private fun scanZalo(nodes: List<ScreenNode>, width: Int, height: Int, settled: Boolean) {
+        val screen = ChatParser.parseZalo(nodes, width, height)
+        if (screen == null) {
+            openChat = null
+            entry = null
+            return
+        }
+        chatRead = true
+        val shown = screen.title + screen.rows.joinToString("\u0002") { it.text }
+        if (shown == zaloShown) return
+        if (!settled) {
+            if (!capturePending) {
+                capturePending = true
+                handler.postDelayed({
+                    capturePending = false
+                    guarded { scanWindow(settled = true) }
+                }, CAPTURE_DELAY_MS)
+            }
+            return
+        }
+        val callback = object : TakeScreenshotCallback {
+            override fun onSuccess(result: ScreenshotResult) = guarded {
+                val buffer = result.hardwareBuffer
+                val shot = Bitmap.wrapHardwareBuffer(buffer, result.colorSpace)
+                    ?.copy(Bitmap.Config.ARGB_8888, false)
+                buffer.close()
+                val root = rootInActiveWindow?.takeIf { it.packageName?.toString() == Source.ZALO.packageName }
+                if (shot != null && root != null) {
+                    val current = ArrayList<ScreenNode>().also { collect(root, it, 0) }.toSet()
+                    if (screen.rows.all { it.node in current }) {
+                        val sides = screen.rows.map { bubbleSide(shot, it.node) }
+                        zaloShown = shown
+                        saveParsed(ChatParser.zaloChat(screen.title, screen.rows, sides), Source.ZALO, true)
+                    }
+                }
+            }
+
+            override fun onFailure(errorCode: Int) = Unit
+        }
+        try {
+            takeScreenshot(Display.DEFAULT_DISPLAY, executor, callback)
+        } catch (e: SecurityException) {
+            Diagnostics.record(this, e)
+        }
+    }
+
+    private fun bubbleSide(shot: Bitmap, node: ScreenNode): Boolean? {
+        val scale = shotScale(shot)
+        val top = (node.top * scale).toInt().coerceIn(0, shot.height - 1)
+        val bottom = (node.bottom * scale).toInt().coerceIn(0, shot.height - 1)
+        var left = shot.width
+        var right = 0
+        for (line in 1..SIDE_LINES) {
+            val y = top + (bottom - top) * line / (SIDE_LINES + 1)
+            val background = shot.getPixel(shot.width - 3, y)
+            for (x in 0 until shot.width step SIDE_STEP) {
+                if (ChatParser.colourGap(shot.getPixel(x, y), background) > SIDE_CONTRAST) {
+                    left = minOf(left, x)
+                    right = maxOf(right, x)
+                }
+            }
+        }
+        return ChatParser.zaloSide(left, right, shot.width)
+    }
+
+    private fun saveParsed(parsed: ScreenChat, source: Source, settled: Boolean) {
         val store = MessageStore.get(this, source)
         val now = System.currentTimeMillis()
         val title = parsed.conversation
@@ -350,12 +420,16 @@ class MessengerAccessibilityService : AccessibilityService() {
         return ChatParser.looksLikeAvatar(corners, inner)
     }
 
-    private fun crop(shot: Bitmap, node: ScreenNode): Bitmap? {
-        // Phones that render below panel resolution report nodes and screenshots at different sizes.
+    /** Phones that render below panel resolution report nodes and screenshots at different sizes. */
+    private fun shotScale(shot: Bitmap): Float {
         val size = Point()
         @Suppress("DEPRECATION")
         getSystemService(DisplayManager::class.java).getDisplay(Display.DEFAULT_DISPLAY).getRealSize(size)
-        val scale = if (size.x > 0) shot.width.toFloat() / size.x else 1f
+        return if (size.x > 0) shot.width.toFloat() / size.x else 1f
+    }
+
+    private fun crop(shot: Bitmap, node: ScreenNode): Bitmap? {
+        val scale = shotScale(shot)
         val left = (node.left * scale).toInt().coerceAtLeast(0)
         val top = (node.top * scale).toInt().coerceAtLeast(0)
         val width = minOf((node.right * scale).toInt(), shot.width) - left
@@ -399,6 +473,9 @@ class MessengerAccessibilityService : AccessibilityService() {
         private const val ENTRY_STABLE_MS = 450L
         private const val UNKNOWN_STABLE_MS = 2000L
         private const val MAX_STALE_READS = 8
+        private const val SIDE_LINES = 7
+        private const val SIDE_STEP = 6
+        private const val SIDE_CONTRAST = 18
         private const val MAX_DEPTH = 40
 
         /** The settings toggle can stay on after a vendor cleaner has killed the service. */

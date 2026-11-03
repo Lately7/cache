@@ -231,9 +231,9 @@ class MainActivity : Activity() {
         addView(action("Xoá tất cả") { confirmDelete() })
         addView(action("Xem lỗi gần nhất") { showText("Lỗi gần nhất", Diagnostics.lastError(context)) })
         addView(action("Xem nhật ký lưu tin") { showText("Nhật ký lưu tin", Diagnostics.traceLog(context)) })
-        addView(action("Ghi cấu trúc màn hình Messenger") {
+        addView(action("Ghi cấu trúc màn hình app chat") {
             Settings.requestDump(context)
-            Toast.makeText(context, "Mở một đoạn chat có ảnh trong Messenger, rồi quay lại bấm Xem cấu trúc", Toast.LENGTH_LONG).show()
+            Toast.makeText(context, "Mở một đoạn chat trong Messenger hoặc Zalo, rồi quay lại bấm Xem cấu trúc", Toast.LENGTH_LONG).show()
         })
         addView(action("Xem cấu trúc đã ghi") { showText("Cấu trúc màn hình", Diagnostics.lastDump(context)) })
         addView(Switch(context).apply {
@@ -357,7 +357,7 @@ class MainActivity : Activity() {
         empty.text = when {
             term.isNotEmpty() -> "Không tìm thấy tin nào."
             showLinks -> "Chưa có link hoặc tệp nào."
-            source == Source.ZALO -> "Chưa có tin Zalo nào. Tin nhận được sẽ lưu từ thông báo của Zalo."
+            source == Source.ZALO -> "Chưa có tin nào. Mở một đoạn chat trong Zalo để bắt đầu lưu."
             else -> "Chưa có tin nào. Mở một đoạn chat trong Messenger để bắt đầu lưu."
         }
     }
