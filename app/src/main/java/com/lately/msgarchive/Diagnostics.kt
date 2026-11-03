@@ -13,6 +13,10 @@ object Diagnostics {
     private const val ERROR_FILE = "last-error.txt"
     private const val DUMP_FILE = "screen-dump.txt"
     private const val MAX_TEXT = 60
+    private const val TRACE_FILE = "capture-log.txt"
+    private const val MAX_TRACE_LINES = 200
+    private val traceLock = Any()
+    private val traceTime = java.text.SimpleDateFormat("dd/MM HH:mm:ss", java.util.Locale.getDefault())
 
     fun record(context: Context, error: Throwable) {
         val trace = StringWriter().also { error.printStackTrace(PrintWriter(it)) }
@@ -23,13 +27,28 @@ object Diagnostics {
         }
     }
 
+    /** Which chat each screen and notification went to; chat names only, never message text. */
+    fun trace(context: Context, line: String) = synchronized(traceLock) {
+        val file = File(context.filesDir, TRACE_FILE)
+        try {
+            val old = if (file.exists()) file.readLines() else emptyList()
+            if (old.lastOrNull()?.substringAfter(" | ") == line) return@synchronized
+            val entry = "${traceTime.format(Date())} | $line"
+            file.writeText((old + entry).takeLast(MAX_TRACE_LINES).joinToString("\n"))
+        } catch (_: IOException) {
+            // A log must never stop a message from being saved.
+        }
+    }
+
+    fun traceLog(context: Context) = File(context.filesDir, TRACE_FILE).takeIf { it.exists() }?.readText()
+
     fun lastError(context: Context) = File(context.filesDir, ERROR_FILE).takeIf { it.exists() }?.readText()
 
     /** Messenger's labels for photos and files are unknown until seen; text is cut short to limit what is copied. */
     fun writeDump(context: Context, nodes: List<ScreenNode>) {
         val lines = nodes.joinToString("\n") {
             "${it.className.substringAfterLast('.')}|${it.left},${it.top},${it.right},${it.bottom}|" +
-                "${if (it.editable) "edit" else ""}|${it.text.take(MAX_TEXT).replace('\n', ' ')}"
+                "${if (it.editable) "edit" else ""}${if (it.visible) "" else "hidden"}|${it.text.take(MAX_TEXT).replace('\n', ' ')}"
         }
         File(context.filesDir, DUMP_FILE).writeText(lines)
     }

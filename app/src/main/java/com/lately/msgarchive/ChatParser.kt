@@ -9,6 +9,8 @@ data class ScreenNode(
     val bottom: Int,
     val editable: Boolean = false,
     val className: String = "",
+    val visible: Boolean = true,
+    val clickable: Boolean = false,
 )
 
 data class ScreenMessage(
@@ -62,6 +64,8 @@ object ChatParser {
         Regex("""^\d{1,2}\s+tháng\s+\d{1,2}.*""", RegexOption.IGNORE_CASE),
         Regex("""^(đã xem|đã gửi|đã nhận|đang gửi|seen|sent|delivered|sending)\b.*""", RegexOption.IGNORE_CASE),
         Regex("""^(đang hoạt động|hoạt động|active)\b.*""", RegexOption.IGNORE_CASE),
+        Regex("""^.*\bsent by .+ on .*$""", options),
+        Regex("""^.*\bis typing\b.*$""", options),
     )
 
     private val KINDS = listOf(
@@ -78,6 +82,8 @@ object ChatParser {
     private const val AVATAR_CORNER_GAP = 40
     private const val AVATAR_MIN_CONTRAST = 40
     private const val AVATAR_MIN_DETAIL = 24
+    private const val SAME_FACE_GAP = 40
+    private const val MIN_BUBBLE_SHARE = 0.07
 
     /** A short label on a bubble too tall for one line of text is an attachment; files are recognised by name alone. */
     fun mediaKind(text: String, node: ScreenNode, width: Int): String? {
@@ -112,6 +118,32 @@ object ChatParser {
         return name.substring(title.length + 2, name.length - 1).toIntOrNull()?.takeIf { it > 1 }
     }
 
+    /** Mean colour distance between two same-size avatar samples; a person's picture stays close to itself. */
+    fun sameFace(a: IntArray, b: IntArray): Boolean {
+        if (a.isEmpty() || a.size != b.size) return false
+        return a.indices.sumOf { colourGap(a[it], b[it]) } / a.size <= SAME_FACE_GAP
+    }
+
+    /**
+     * Link cards and big single emoji carry no "double tap" label. Unlike dates and read receipts they
+     * can be tapped, and unlike reaction chips they are at least as tall as a line of text in a bubble.
+     */
+    private fun isUnlabelledBubble(node: ScreenNode, width: Int) =
+        node.clickable && node.bottom - node.top >= width * MIN_BUBBLE_SHARE && !isNoise(node.text)
+
+    private fun contains(outer: ScreenNode, inner: ScreenNode) = inner !== outer &&
+        inner.left >= outer.left && inner.right <= outer.right && inner.top >= outer.top && inner.bottom <= outer.bottom
+
+    /** A card's own label leaves out what was typed above the preview, which only its children show. */
+    private fun cardText(card: ScreenNode, nodes: List<ScreenNode>): String {
+        val lines = nodes.filter { !it.clickable && it.text.isNotBlank() && contains(card, it) }.map { it.text.trim() }
+        return lines.distinct().joinToString("\n").ifEmpty { card.text.trim() }
+    }
+
+    /** A title that changes while the old bubbles stay is a chat still loading, not a chat with new content. */
+    fun mostlySame(seen: Set<String>, previous: Set<String>) =
+        seen.isNotEmpty() && seen.count { it in previous } * 2 > seen.size
+
     fun isGroup(messages: List<ScreenMessage>) =
         messages.filterNot { it.outgoing }.mapNotNull { it.sender }.distinct().size > 1
 
@@ -123,16 +155,24 @@ object ChatParser {
         BUBBLE.matchEntire(text.trim())?.let { MarkedBubble(it.groupValues[1].trim(), it.groupValues[2].trim()) }
 
     private fun titleNode(nodes: List<ScreenNode>, width: Int, height: Int): ScreenNode? {
-        val top = nodes.filter { !it.editable && it.bottom <= height * 0.3 }
         // "Thread details" names the header outright; position is only a guess, used when it is missing.
+        val top = nodes.filter { !it.editable && it.bottom <= height * 0.3 }
         top.firstOrNull { TITLE_SUFFIX.containsMatchIn(it.text.trim()) }?.let { return it }
         return top
             .filter { it.bottom <= height * HEADER_SHARE && it.left > width * 0.08 && !isNoise(it.text) }
+            .filterNot { "Button" in it.className }
             .minWithOrNull(compareBy({ it.top }, { it.left }))
     }
 
     /** Returns null unless this looks like an open chat: a composer box or a labelled bubble tells it from the chat list. */
-    fun parse(nodes: List<ScreenNode>, width: Int, height: Int): ScreenChat? {
+    fun parse(allNodes: List<ScreenNode>, width: Int, height: Int): ScreenChat? {
+        // A chat kept alive behind the current screen must not lend its title or bubbles to this one.
+        val shown = allNodes.filter { it.visible }
+        val nodes = if (shown.any { !it.editable && parseMarked(it.text) != null }) shown else allNodes
+        // Two chats in one tree means a transition; the next read will show only one of them.
+        val headers = nodes.filter { !it.editable && TITLE_SUFFIX.containsMatchIn(it.text.trim()) }
+        if (headers.map { cleanTitle(it.text) }.distinct().size > 1) return null
+
         // The label is only present in some Messenger languages; without it, fall back to layout alone.
         val labelled = nodes.any { !it.editable && parseMarked(it.text) != null }
         // The keyboard pushes the composer up to mid-screen; the chat list's search box stays near the top.
@@ -141,11 +181,10 @@ object ChatParser {
         if (composer == null && !labelled) return null
         val composerTop = composer?.top ?: height
 
+        // No title yet means the header is still loading. Guessing would file these bubbles under the
+        // wrong chat, while waiting costs nothing: the same bubbles are read again a moment later.
         val header = titleNode(nodes, width, height)
-        // A sender is a weaker name than the title, but a wrong name beats losing the screen.
-        val title = header?.text?.let(::cleanTitle)?.takeIf { it.isNotBlank() }
-            ?: nodes.firstNotNullOfOrNull { node -> parseMarked(node.text)?.sender?.takeIf { node.left < width - node.right } }
-            ?: return null
+        val title = header?.text?.let(::cleanTitle)?.takeIf { it.isNotBlank() } ?: return null
 
         // Tall bubbles are clipped by the list, so they can poke above the usual header line or into the composer.
         val headerBottom = if (labelled) header?.bottom ?: 0 else (height * HEADER_SHARE).toInt()
@@ -171,7 +210,9 @@ object ChatParser {
             // Label first: a sender called "Active" or "Seen" must not look like a status line.
             val marked = parseMarked(node.text)
             if (marked == null && isNoise(node.text)) continue
-            if (labelled && (marked == null || marked.text.isBlank())) continue
+            if (marked?.text?.isBlank() == true) continue
+            // The attachment buttons beside the composer start a little higher than the box itself.
+            if (labelled && marked == null && (node.bottom > composerTop || !isUnlabelledBubble(node, width))) continue
 
             // Messenger often repeats a bubble's text on a parent and a child node.
             val prev = last
@@ -182,8 +223,9 @@ object ChatParser {
             // bubble can be just as centred, and the label proves it is a message.
             if (marked == null && kotlin.math.abs(leftGap - rightGap) < width * 0.03) continue
             val outgoing = rightGap < leftGap
-            val sender = if (outgoing) null else marked?.sender ?: title
-            val text = marked?.text ?: node.text.trim()
+            val nearby = ordered.lastOrNull { !it.outgoing }?.sender
+            val sender = if (outgoing) null else marked?.sender ?: nearby ?: title
+            val text = marked?.text ?: if (labelled) cardText(node, nodes) else node.text.trim()
             ordered.add(ScreenMessage(text, outgoing, "", sender, mediaKind(text, node, width)))
             orderedNodes.add(node)
             last = node

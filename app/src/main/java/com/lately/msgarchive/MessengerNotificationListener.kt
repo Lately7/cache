@@ -53,6 +53,8 @@ class MessengerNotificationListener : NotificationListenerService() {
         val store = MessageStore.get(this)
         val conversation = store.threadForNotification(title, notification.shortcutId)
         saveAvatar(conversation, notification.getLargeIcon())
+        val threadId = if (notification.shortcutId == null) "không có mã" else "có mã"
+        Diagnostics.trace(this, "Thông báo $title ($threadId): vào $conversation")
 
         if (styled.isNullOrEmpty()) {
             // Without message data this may be a missed call or an app prompt rather than a chat.

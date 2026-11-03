@@ -11,8 +11,8 @@ android {
         applicationId = "com.lately.msgarchive"
         minSdk = 30
         targetSdk = 35
-        versionCode = 7
-        versionName = "0.4.1"
+        versionCode = 9
+        versionName = "0.4.3"
         testInstrumentationRunner = "com.lately.msgarchive.StoreCheck"
     }
 

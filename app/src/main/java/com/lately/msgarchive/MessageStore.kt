@@ -22,6 +22,8 @@ data class Message(
 
 data class SavedScreen(val ids: Map<ScreenMessage, Long>, val added: Int)
 
+data class ThreadMatch(val name: String?, val known: List<String>, val unused: String)
+
 data class Conversation(
     val name: String,
     val count: Int,
@@ -330,17 +332,22 @@ class MessageStore private constructor(context: Context) :
     }
 
     /**
-     * Picks which chat a screen belongs to when it is opened. Two people can share a name, and the only
-     * clue is that the newest bubbles of a chat already seen are stored there. No match means another
-     * person, except in a group: several senders under one title is one busy chat, not a namesake.
+     * Picks which chat a screen belongs to when it is opened: the stored chat whose bubbles are showing.
+     * A null name means none of them are, which is either many new messages or a namesake; the caller
+     * settles that by comparing avatars. Several senders under one title is one chat, not a namesake.
      */
-    fun resolveConversation(chat: ScreenChat, now: Long): String {
+    fun findConversation(chat: ScreenChat, now: Long): ThreadMatch {
         val title = chat.conversation
         val known = threadsNamed(title)
-        if (known.isEmpty() || chat.messages.isEmpty()) return known.firstOrNull() ?: title
+        val unused = nextThread(title, known)
+        if (known.isEmpty()) return ThreadMatch(title, known, unused)
+        if (chat.messages.isEmpty()) return ThreadMatch(known.first(), known, unused)
         val best = known.map { it to overlap(it, chat, now) }.maxBy { it.second }
-        if (best.second > 0) return best.first
-        return if (ChatParser.isGroup(chat.messages)) known.first() else nextThread(title, known)
+        return when {
+            best.second > 0 -> ThreadMatch(best.first, known, unused)
+            ChatParser.isGroup(chat.messages) -> ThreadMatch(known.first(), known, unused)
+            else -> ThreadMatch(null, known, unused)
+        }
     }
 
     /** Notifications do carry a per-chat id, so namesakes stay apart even before either chat is opened. */

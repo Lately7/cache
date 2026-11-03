@@ -15,6 +15,7 @@ import java.security.MessageDigest
 /** Avatars live in private storage, named by hash so display names never become file paths. */
 object AvatarStore {
     private const val SIZE = 128
+    private const val FACE_GRID = 16
     private val cache = LruCache<String, Bitmap>(64)
     private val palette = intArrayOf(0xFF0084FF.toInt(), 0xFF44BEC7.toInt(), 0xFFFA3C4C.toInt(), 0xFFD696BB.toInt(), 0xFF6699CC.toInt())
 
@@ -25,6 +26,22 @@ object AvatarStore {
     }
 
     fun has(context: Context, name: String) = file(context, name).exists()
+
+    private fun sample(bitmap: Bitmap): IntArray {
+        val small = Bitmap.createScaledBitmap(bitmap, FACE_GRID, FACE_GRID, true)
+        val centre = FACE_GRID / 2
+        // Corners are the chat background, which differs from one screen to the next.
+        val inside = (0 until FACE_GRID).flatMap { y -> (0 until FACE_GRID).map { x -> x to y } }
+            .filter { (x, y) -> (x - centre) * (x - centre) + (y - centre) * (y - centre) < centre * centre * 3 / 4 }
+        return inside.map { (x, y) -> small.getPixel(x, y) }.toIntArray()
+    }
+
+    /** False when nothing is stored under this name, so an unknown chat never counts as a match. */
+    fun matches(context: Context, name: String, picture: Bitmap): Boolean {
+        if (!has(context, name)) return false
+        val stored = load(context, name).copy(Bitmap.Config.ARGB_8888, false)
+        return ChatParser.sameFace(sample(stored), sample(picture))
+    }
 
     fun delete(context: Context, name: String) {
         file(context, name).delete()

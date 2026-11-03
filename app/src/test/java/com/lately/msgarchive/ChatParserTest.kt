@@ -148,9 +148,9 @@ class ChatParserTest {
     }
 
     @Test
-    fun blankChatTitleFallsBackToTheSender() {
+    fun blankChatTitleIsNotAChat() {
         val nodes = listOf(ScreenNode(", Thread details", 200, 80, 600, 150), composer, incoming("Hien, a$suffix", 400))
-        assertEquals("Hien", ChatParser.parse(nodes, width, height)!!.conversation)
+        assertNull(ChatParser.parse(nodes, width, height))
     }
 
     @Test(timeout = 2000)
@@ -198,9 +198,55 @@ class ChatParserTest {
     }
 
     @Test
-    fun missingTitleFallsBackToTheSender() {
+    fun bubblesWithoutATitleAreNotFiledUnderTheSender() {
         val nodes = listOf(composer, incoming("Hien, đầu$suffix", 400), incoming("Hien, chào$suffix", 550))
-        assertEquals("Hien", ChatParser.parse(nodes, width, height)!!.conversation)
+        assertNull(ChatParser.parse(nodes, width, height))
+    }
+
+    @Test
+    fun twoHeadersMeanATransition() {
+        val a = ScreenNode("Long Vu, Thread details", 200, 80, 600, 150)
+        val b = ScreenNode("Lan Anh, Thread details", 300, 80, 700, 150)
+        assertNull(ChatParser.parse(listOf(a, b, composer, incoming("Hien, đầu$suffix", 400)), width, height))
+    }
+
+    @Test
+    fun hiddenChatLendsNeitherTitleNorBubbles() {
+        val hidden = ScreenNode("Long Vu, Thread details", 200, 80, 600, 150, visible = false)
+        val shown = ScreenNode("Lan Anh, Thread details", 200, 80, 600, 150)
+        val nodes = listOf(
+            hidden,
+            shown,
+            composer,
+            incoming("Hien, cũ$suffix", 300).copy(visible = false),
+            incoming("Lan, đầu$suffix", 400),
+            incoming("Lan, chào$suffix", 550),
+        )
+        val chat = ChatParser.parse(nodes, width, height)!!
+        assertEquals("Lan Anh", chat.conversation)
+        assertEquals(listOf("chào"), chat.messages.map { it.text })
+    }
+
+    @Test
+    fun callButtonIsNotATitle() {
+        val call = ScreenNode("Start audio call", 800, 60, 900, 140, className = "android.widget.Button")
+        assertNull(ChatParser.parse(listOf(call, composer, incoming("đầu", 400)), width, height))
+    }
+
+    @Test
+    fun oldBubblesUnderANewTitleAreStale() {
+        assertEquals(true, ChatParser.mostlySame(setOf("a", "b", "c"), setOf("a", "b", "x")))
+        assertEquals(false, ChatParser.mostlySame(setOf("a", "b", "c"), setOf("a", "y", "x")))
+        assertEquals(false, ChatParser.mostlySame(emptySet(), emptySet()))
+    }
+
+    @Test
+    fun sameFaceToleratesScalingNotAnotherPerson() {
+        val photo = intArrayOf(0xFF8040A0.toInt(), 0xFF204060.toInt())
+        val rescaled = intArrayOf(0xFF8A4AA8.toInt(), 0xFF264866.toInt())
+        val other = intArrayOf(0xFF10E020.toInt(), 0xFFE0C010.toInt())
+        assertEquals(true, ChatParser.sameFace(photo, rescaled))
+        assertEquals(false, ChatParser.sameFace(photo, other))
     }
 
     @Test
@@ -242,6 +288,54 @@ class ChatParserTest {
         assertEquals(3, ChatParser.threadNumber("Lan", "Lan (3)"))
         assertNull(ChatParser.threadNumber("Lan", "Lan (bạn)"))
         assertNull(ChatParser.threadNumber("Lan", "Lan Anh"))
+    }
+
+    /** Layout taken from a real Messenger 586 chat on the iQOO; names and text are replaced. */
+    private val realWidth = 1260
+    private val realHeight = 2800
+    private fun real(text: String, l: Int, t: Int, r: Int, b: Int, clickable: Boolean = true, editable: Boolean = false) =
+        ScreenNode(text, l, t, r, b, editable = editable, clickable = clickable)
+
+    private val realChat = listOf(
+        real("Back", 12, 129, 159, 276),
+        real("An Binh, Thread details", 171, 129, 790, 276),
+        real("An Binh", 318, 157, 790, 210, clickable = false),
+        real("Audio call", 807, 129, 954, 276),
+        real("Thread details", 1101, 129, 1248, 276),
+        real("Binh, hello$suffix", 160, 303, 273, 413),
+        real("Binh, cuoi$suffix", 160, 419, 279, 529),
+        real("Open An Binh's profile", 37, 443, 123, 529),
+        real("😂", 160, 572, 344, 714),
+        real("Open An Binh's profile", 37, 628, 123, 714),
+        real("FRI AT 09:13", 549, 757, 711, 796, clickable = false),
+        real("Bai bao hay, vnexpress.net", 160, 827, 1027, 1089),
+        real("xem cai nay https://x.vn/a", 197, 852, 828, 905, clickable = false),
+        real("Bai bao hay", 160, 967, 473, 1013, clickable = false),
+        real("vnexpress.net", 160, 1013, 435, 1052, clickable = false),
+        real("Preview link x sent by An Binh on Friday at 09:13", 1064, 903, 1174, 1013),
+        real("Clip, youtube.com", 405, 1202, 1235, 1510),
+        real("day ne", 442, 1227, 1198, 1326, clickable = false),
+        real("Delivered Fri", 1031, 1522, 1198, 1561, clickable = false),
+        real("❤ 1", 170, 1100, 260, 1150),
+        real("Type a message", 488, 1614, 1039, 1743, editable = true),
+        real("Open camera", 122, 1587, 244, 1771),
+    )
+
+    @Test
+    fun linkCardsAndEmojiInARealChatAreKept() {
+        val chat = ChatParser.parse(realChat, realWidth, realHeight)!!
+        assertEquals("An Binh", chat.conversation)
+        assertEquals(
+            listOf(
+                "cuoi",
+                "😂",
+                "xem cai nay https://x.vn/a\nBai bao hay\nvnexpress.net",
+                "day ne",
+            ),
+            chat.messages.map { it.text },
+        )
+        assertEquals(listOf(false, false, false, true), chat.messages.map { it.outgoing })
+        assertEquals(listOf("Binh", "Binh", "Binh", null), chat.messages.map { it.sender })
     }
 
     @Test

@@ -173,6 +173,7 @@ class MainActivity : Activity() {
         addView(action("Xuất JSON") { startExport() })
         addView(action("Xoá tất cả") { confirmDelete() })
         addView(action("Xem lỗi gần nhất") { showText("Lỗi gần nhất", Diagnostics.lastError(context)) })
+        addView(action("Xem nhật ký lưu tin") { showText("Nhật ký lưu tin", Diagnostics.traceLog(context)) })
         addView(action("Ghi cấu trúc màn hình Messenger") {
             Settings.requestDump(context)
             Toast.makeText(context, "Mở một đoạn chat có ảnh trong Messenger, rồi quay lại bấm Xem cấu trúc", Toast.LENGTH_LONG).show()

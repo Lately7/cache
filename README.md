@@ -11,6 +11,9 @@ nút **Xuất JSON**. Giao diện luôn ở nền tối, theo màu của Messeng
 | Thông báo | Tin nhận (kể cả khi không mở Messenger) | Phải bật thông báo Messenger; thu hồi hoặc tắt thông báo thì mất |
 | Trợ năng | Tin gửi và nhận đang hiện trên màn hình | Chỉ khi mở đoạn chat; tin chưa cuộn tới thì không có |
 
+Tin link và tin chỉ có một emoji không có nhãn của Messenger, nên người gửi của chúng được lấy theo
+bong bóng gần nhất; trong nhóm, tên này có thể chưa đúng.
+
 Ảnh được cắt từ màn hình khi bạn mở đoạn chat nên chất lượng bằng ảnh đang hiển thị, không phải
 ảnh gốc. Video chỉ lưu được ảnh xem trước, file chỉ lưu được tên. Tin thoại chưa được hỗ trợ.
 Nhận diện ảnh dựa vào nhãn "Photo", "Video"; nếu Messenger dùng nhãn khác, vào ⚙ > Ghi cấu trúc
@@ -20,9 +23,11 @@ tin ngay sau nó. Cuộn từ từ để luôn còn tin đã lưu trên màn hì
 không biết đoạn mới nằm ở đâu. Bong bóng trên cùng màn hình chỉ được lưu khi cuộn lên thấy tin
 phía trước nó.
 
-Messenger không cho biết mã đoạn chat trên màn hình, nên hai người trùng tên được phân biệt như sau:
-lúc mở đoạn chat, nếu tin đang hiện chưa có trong đoạn cùng tên nào thì app tạo đoạn mới tên
-"Tên (2)". Vì vậy một đoạn chat có quá nhiều tin mới mà không có thông báo nào cũng có thể bị tách.
+Messenger không cho biết mã đoạn chat trên màn hình, nên app chỉ lưu khi tiêu đề và tin đã đứng yên,
+để tin của đoạn trước không lọt vào đoạn vừa mở. Hai người trùng tên được phân biệt lúc mở chat: nếu
+tin đang hiện chưa có trong đoạn cùng tên nào, app so avatar, khác thì tạo đoạn "Tên (2)". Không có
+avatar để so thì tin vào đoạn đã có, nên hai người trùng tên có thể vẫn bị gộp trong trường hợp này.
+Nhật ký từng lần lưu nằm ở ⚙ > Xem nhật ký lưu tin, chỉ gồm tên đoạn chat, không có nội dung tin.
 Đoạn đã lỡ gộp từ bản cũ không tách lại được: nhấn giữ đoạn đó trong danh sách để xoá, rồi mở lại
 từng người trong Messenger.
 

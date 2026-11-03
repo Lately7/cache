@@ -47,7 +47,15 @@ class MessengerAccessibilityService : AccessibilityService() {
     private var scrolled = false
 
     private var lastSeen = emptySet<String>()
+    private var lastTitle: String? = null
     private var capturePending = false
+
+    // A chat is only trusted once its title and bubbles have held still; the two load separately.
+    private var entry: String? = null
+    private var entrySince = 0L
+    private var staleReads = 0
+    private var verdict: Pair<String, String>? = null
+    private var identifying = false
 
     override fun onAccessibilityEvent(event: AccessibilityEvent) {
         if (event.packageName?.toString() != MESSENGER_PACKAGE) return
@@ -133,7 +141,7 @@ class MessengerAccessibilityService : AccessibilityService() {
         val parsed = ChatParser.parse(nodes, metrics.widthPixels, metrics.heightPixels)
         if (parsed == null) {
             openChat = null
-            lastSeen = emptySet()
+            entry = null
             if (!chatRead) Settings.noteCapture(this, "Không phải màn hình chat (${nodes.size} mục)")
             return
         }
@@ -142,20 +150,21 @@ class MessengerAccessibilityService : AccessibilityService() {
         val store = MessageStore.get(this)
         val now = System.currentTimeMillis()
         val title = parsed.conversation
-        val seen = parsed.messages.map { it.previousText + "" + it.text }.toSet()
-        // The window event can arrive after the first read, so a screen replaced without scrolling also counts.
-        val jumped = !scrolled && seen.isNotEmpty() && lastSeen.isNotEmpty() && seen.none { it in lastSeen }
+        val seen = parsed.messages.map { it.previousText + "\u0001" + it.text }.toSet()
+        if (seen.isEmpty()) return
+        val thread = threadFor(parsed, seen, now) ?: return
+        openChat = title to thread
+        lastTitle = title
+        lastSeen = seen
+        windowChanged = false
         scrolled = false
-        val opened = openChat?.takeIf { it.first == title && !windowChanged && !jumped }?.second
-        val thread = opened ?: store.resolveConversation(parsed, now)
-        if (parsed.messages.isNotEmpty()) {
-            openChat = title to thread
-            windowChanged = false
-            lastSeen = seen
-        }
+        entry = null
+        staleReads = 0
+        verdict = null
         val chat = parsed.copy(conversation = thread)
         val saved = store.saveScreen(chat, now)
         Settings.noteCapture(this, "${chat.conversation}: thấy ${chat.messages.size} tin, ${saved.added} tin mới")
+        if (saved.added > 0) Diagnostics.trace(this, "$thread: lưu ${saved.added}/${chat.messages.size} tin")
 
         val media = chat.media.mapNotNull { item ->
             saved.ids[item.message]?.takeIf(store::missingMedia)?.let { it to item.node }
@@ -178,6 +187,92 @@ class MessengerAccessibilityService : AccessibilityService() {
                 capturePending = false
                 guarded { scanWindow(settled = true) }
             }, CAPTURE_DELAY_MS)
+        }
+    }
+
+    /** Null means this screen cannot be trusted yet; a later read decides. */
+    private fun threadFor(parsed: ScreenChat, seen: Set<String>, now: Long): String? {
+        val title = parsed.conversation
+        val fresh = openChat?.first != title || windowChanged
+        // The window event can arrive after the first read, so a screen replaced without scrolling also counts.
+        val jumped = !scrolled && lastSeen.isNotEmpty() && seen.none { it in lastSeen }
+        if (!fresh && !jumped) return openChat?.second
+
+        if (lastTitle != null && lastTitle != title && ChatParser.mostlySame(seen, lastSeen)) {
+            Diagnostics.trace(this, "Bỏ qua: tiêu đề $title nhưng tin của $lastTitle")
+            if (staleReads++ < MAX_STALE_READS) readAgainIn(ENTRY_STABLE_MS)
+            return null
+        }
+
+        val match = MessageStore.get(this).findConversation(parsed, now)
+        val signature = title + "\u0002" + seen.joinToString("\u0002")
+        val clock = SystemClock.uptimeMillis()
+        if (entry != signature) {
+            entry = signature
+            entrySince = clock
+        }
+        // Bubbles matching no known chat are the likeliest to be a title that has not caught up yet.
+        val needed = if (match.name != null && fresh) ENTRY_STABLE_MS else UNKNOWN_STABLE_MS
+        val waited = clock - entrySince
+        if (waited < needed) {
+            readAgainIn(needed - waited)
+            return null
+        }
+        if (!fresh) return openChat?.second
+        match.name?.let {
+            Diagnostics.trace(this, "Mở $title: vào $it")
+            return it
+        }
+
+        verdict?.takeIf { it.first == signature }?.let { return it.second }
+        val avatar = parsed.avatars.firstOrNull { it.node.right - it.node.left == it.node.bottom - it.node.top }
+        if (avatar == null) {
+            Diagnostics.trace(this, "Mở $title: toàn tin mới, không có avatar để so, vào ${match.known.first()}")
+            return match.known.first()
+        }
+        if (!identifying) identify(signature, match, avatar.node)
+        return null
+    }
+
+    private fun readAgainIn(delay: Long) {
+        handler.removeCallbacks(scan)
+        handler.postDelayed(scan, delay)
+    }
+
+    /** All the bubbles are new, so only the picture can tell the same person from a namesake. */
+    private fun identify(signature: String, match: ThreadMatch, node: ScreenNode) {
+        identifying = true
+        fun decide(thread: String, reason: String) {
+            identifying = false
+            verdict = signature to thread
+            Diagnostics.trace(this, "${match.known.first()}: toàn tin mới, $reason, vào $thread")
+            readAgainIn(0)
+        }
+        val callback = object : TakeScreenshotCallback {
+            override fun onSuccess(result: ScreenshotResult) = guarded {
+                val buffer = result.hardwareBuffer
+                val shot = Bitmap.wrapHardwareBuffer(buffer, result.colorSpace)
+                    ?.copy(Bitmap.Config.ARGB_8888, false)
+                buffer.close()
+                val face = shot?.let { crop(it, node) }?.takeIf(::isAvatar)
+                val service = this@MessengerAccessibilityService
+                val same = face?.let { picture -> match.known.firstOrNull { AvatarStore.matches(service, it, picture) } }
+                val unseen = match.known.firstOrNull { !AvatarStore.has(service, it) }
+                when {
+                    face == null -> decide(match.known.first(), "không đọc được avatar")
+                    same != null -> decide(same, "cùng avatar")
+                    unseen != null -> decide(unseen, "chưa có avatar để so")
+                    else -> decide(match.unused, "khác avatar")
+                }
+            }
+
+            override fun onFailure(errorCode: Int) = decide(match.known.first(), "không chụp được màn hình")
+        }
+        try {
+            takeScreenshot(Display.DEFAULT_DISPLAY, executor, callback)
+        } catch (e: SecurityException) {
+            Diagnostics.record(this, e)
+            decide(match.known.first(), "chưa có quyền chụp màn hình")
         }
     }
 
@@ -262,6 +357,8 @@ class MessengerAccessibilityService : AccessibilityService() {
                     rect.bottom,
                     node.isEditable,
                     node.className?.toString().orEmpty(),
+                    node.isVisibleToUser,
+                    node.isClickable,
                 ),
             )
         }
@@ -276,6 +373,9 @@ class MessengerAccessibilityService : AccessibilityService() {
         private const val SETTLE_DELAY_MS = 500L
         private const val MAX_WAIT_MS = 1500L
         private const val CAPTURE_DELAY_MS = 1000L
+        private const val ENTRY_STABLE_MS = 450L
+        private const val UNKNOWN_STABLE_MS = 2000L
+        private const val MAX_STALE_READS = 8
         private const val MAX_DEPTH = 40
 
         /** The settings toggle can stay on after a vendor cleaner has killed the service. */
