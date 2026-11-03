@@ -55,6 +55,7 @@ class MessengerAccessibilityService : AccessibilityService() {
     @Volatile
     private var leftApp = false
     private var capturePending = false
+    private var rootMisses = 0
     private var zaloShown: String? = null
 
     // A chat is only trusted once its title and bubbles have held still; the two load separately.
@@ -149,8 +150,11 @@ class MessengerAccessibilityService : AccessibilityService() {
         val root = rootOf(source)
         if (root == null) {
             if (!windowRead) Settings.noteCapture(this, "Không đọc được cửa sổ ${source.label}")
+            // A window that just opened has no root yet, and a still screen sends no further event.
+            if (rootMisses++ < MAX_ROOT_MISSES) readAgainIn(ENTRY_STABLE_MS)
             return
         }
+        rootMisses = 0
         windowRead = true
 
         val nodes = ArrayList<ScreenNode>()
@@ -179,6 +183,8 @@ class MessengerAccessibilityService : AccessibilityService() {
         if (screen == null) {
             openChat = null
             entry = null
+            zaloShown = null
+            if (!chatRead) Settings.noteCapture(this, "Zalo: không phải màn hình chat (${nodes.size} mục)")
             return
         }
         chatRead = true
@@ -205,8 +211,9 @@ class MessengerAccessibilityService : AccessibilityService() {
                     val current = ArrayList<ScreenNode>().also { collect(root, it, 0) }.toSet()
                     if (screen.rows.all { it.node in current }) {
                         val sides = screen.rows.map { bubbleSide(shot, it.node) }
-                        zaloShown = shown
-                        saveParsed(ChatParser.zaloChat(screen.title, screen.rows, sides), Source.ZALO, true)
+                        val chat = ChatParser.zaloChat(screen.title, screen.rows, sides)
+                        // Only a finished save may skip the next read: an opening chat is read twice.
+                        if (saveParsed(chat, Source.ZALO, true)) zaloShown = shown
                     }
                 }
             }
@@ -239,13 +246,14 @@ class MessengerAccessibilityService : AccessibilityService() {
         return ChatParser.zaloSide(left, right, shot.width)
     }
 
-    private fun saveParsed(parsed: ScreenChat, source: Source, settled: Boolean) {
+    /** False while the chat is not trusted yet; a later read tries again. */
+    private fun saveParsed(parsed: ScreenChat, source: Source, settled: Boolean): Boolean {
         val store = MessageStore.get(this, source)
         val now = System.currentTimeMillis()
         val title = parsed.conversation
         val seen = parsed.messages.map { it.previousText + "\u0001" + it.text }.toSet()
-        if (seen.isEmpty()) return
-        val thread = threadFor(parsed, seen, now) ?: return
+        if (seen.isEmpty()) return false
+        val thread = threadFor(parsed, seen, now) ?: return false
         openChat = title to thread
         lastTitle = title
         lastSeen = seen
@@ -270,7 +278,7 @@ class MessengerAccessibilityService : AccessibilityService() {
             .map { if (oneToOne) it.copy(owner = thread) else it }
             .distinctBy { it.owner }
             .filterNot { AvatarStore.has(this, source.avatar(it.owner)!!) }
-        if (media.isEmpty() && avatars.isEmpty()) return
+        if (media.isEmpty() && avatars.isEmpty()) return true
         if (settled) {
             capture(media, avatars, source)
         } else if (!capturePending) {
@@ -281,6 +289,7 @@ class MessengerAccessibilityService : AccessibilityService() {
                 guarded { scanWindow(settled = true) }
             }, CAPTURE_DELAY_MS)
         }
+        return true
     }
 
     /** Null means this screen cannot be trusted yet; a later read decides. */
@@ -473,6 +482,7 @@ class MessengerAccessibilityService : AccessibilityService() {
         private const val ENTRY_STABLE_MS = 450L
         private const val UNKNOWN_STABLE_MS = 2000L
         private const val MAX_STALE_READS = 8
+        private const val MAX_ROOT_MISSES = 3
         private const val SIDE_LINES = 7
         private const val SIDE_STEP = 6
         private const val SIDE_CONTRAST = 18
