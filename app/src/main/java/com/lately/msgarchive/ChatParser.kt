@@ -84,6 +84,10 @@ object ChatParser {
     private const val AVATAR_MIN_DETAIL = 24
     private const val SAME_FACE_GAP = 40
     private const val MIN_BUBBLE_SHARE = 0.07
+    private val LINK = Regex(
+        """https?://\S+|www\.\S+|\b[\w-]+(\.[\w-]+)*\.(com|net|org|vn|io|me|co|gg|tv|dev|app)\b(/\S*)?""",
+        RegexOption.IGNORE_CASE,
+    )
 
     /** A short label on a bubble too tall for one line of text is an attachment; files are recognised by name alone. */
     fun mediaKind(text: String, node: ScreenNode, width: Int): String? {
@@ -143,6 +147,12 @@ object ChatParser {
     /** A title that changes while the old bubbles stay is a chat still loading, not a chat with new content. */
     fun mostlySame(seen: Set<String>, previous: Set<String>) =
         seen.isNotEmpty() && seen.count { it in previous } * 2 > seen.size
+
+    /** First web address in a message, always with a scheme; only http and https are ever opened. */
+    fun findLink(text: String): String? {
+        val found = LINK.find(text)?.value?.trimEnd('.', ',', ')', ']', '!', '?', ';', ':') ?: return null
+        return if (found.startsWith("http", ignoreCase = true)) found else "https://$found"
+    }
 
     fun isGroup(messages: List<ScreenMessage>) =
         messages.filterNot { it.outgoing }.mapNotNull { it.sender }.distinct().size > 1

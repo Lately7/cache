@@ -339,6 +339,15 @@ class ChatParserTest {
     }
 
     @Test
+    fun linksAreFoundWithASafeScheme() {
+        assertEquals("https://vnexpress.net/a", ChatParser.findLink("xem vnexpress.net/a nhé"))
+        assertEquals("https://x.vn/b?c=1", ChatParser.findLink("https://x.vn/b?c=1."))
+        assertEquals("https://www.abc.xyz", ChatParser.findLink("www.abc.xyz,"))
+        assertEquals(null, ChatParser.findLink("ok.hihi nhé 12.5 tiếng"))
+        assertEquals(null, ChatParser.findLink("javascript:alert(1)"))
+    }
+
+    @Test
     fun scrolledBackMessagesFitBetweenTheirNeighbours() {
         assertEquals(listOf(11.0, 12.0, 13.0), ChatParser.between(10.0, 14.0, 3))
     }

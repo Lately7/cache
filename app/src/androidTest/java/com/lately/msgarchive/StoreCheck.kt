@@ -130,6 +130,29 @@ class StoreCheck : Instrumentation() {
         store.deleteConversation("Lan (2)")
         if (store.conversations().map { it.name } != listOf("Lan")) failures.add("delete one chat")
 
+        // Each app has its own archive, and links are listed per app.
+        store.deleteAll()
+        val zalo = MessageStore.get(targetContext, Source.ZALO)
+        zalo.deleteAll()
+        zalo.insert(Message("Z", "Y", false, "xem vnexpress.net/a", base, "notification"), "z1")
+        zalo.insert(Message("Z", "Y", false, "bình thường 12.5", base + 1, "notification"), "z2")
+        if (store.conversations().isNotEmpty()) failures.add("Zalo row reached Messenger")
+        if (zalo.linksAndFiles().map { it.body } != listOf("xem vnexpress.net/a")) failures.add("links: ${zalo.linksAndFiles()}")
+
+        // A backup restores both archives over whatever came after it.
+        store.insert(Message(chat, "B", false, "trước", base, "screen"), "b1")
+        val backup = Backup.run(targetContext, force = true)
+        store.insert(Message(chat, "B", false, "sau", base + 1, "screen"), "b2")
+        zalo.deleteAll()
+        if (Backup.run(targetContext) == null) failures.add("changed archive was not backed up")
+        if (Backup.run(targetContext) != null) failures.add("unchanged archive was backed up again")
+        Backup.restore(targetContext, backup!!)
+        val restored = MessageStore.get(targetContext)
+        if (restored.messages(chat).map { it.body } != listOf("trước")) failures.add("restore: ${restored.messages(chat)}")
+        if (MessageStore.get(targetContext, Source.ZALO).conversations().size != 1) failures.add("restore lost Zalo")
+        MessageStore.get(targetContext, Source.ZALO).deleteAll()
+        restored.deleteAll()
+
         // Hostile text must survive storage and search unchanged.
         store.deleteAll()
         val hostile = listOf("'; DROP TABLE messages;--", "100%", "a_b", "back\\slash", "😀‮gnp.exe", "dòng\nmới", "x".repeat(200_000))

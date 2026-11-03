@@ -25,6 +25,7 @@ class Palette(context: Context) {
     val bubbleIn = 0xFF3E4042.toInt()
     val bubbleOut = context.getColor(R.color.accent)
     val onBubbleOut = 0xFFFFFFFF.toInt()
+    val linkIn = 0xFF8AB4FF.toInt()
 }
 
 /** OEM themes can force dark icons onto the bars; the app is always black, so they must stay light. */
@@ -38,6 +39,15 @@ fun Activity.matchSystemBars() {
 fun Context.divider(colors: Palette) = View(this).apply {
     setBackgroundColor(colors.divider)
     layoutParams = android.widget.LinearLayout.LayoutParams(-1, maxOf(1, dp(1) / 2))
+}
+
+/** Icons are drawn white and tinted here, so one drawable serves every state. */
+fun Context.iconButton(icon: Int, label: String, tint: Int, onClick: () -> Unit) = ImageView(this).apply {
+    setImageResource(icon)
+    imageTintList = android.content.res.ColorStateList.valueOf(tint)
+    scaleType = ImageView.ScaleType.CENTER
+    contentDescription = label
+    setOnClickListener { onClick() }
 }
 
 fun Context.avatarView(sizeDp: Int) = ImageView(this).apply {

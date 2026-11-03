@@ -48,6 +48,12 @@ class MessengerAccessibilityService : AccessibilityService() {
 
     private var lastSeen = emptySet<String>()
     private var lastTitle: String? = null
+
+    @Volatile
+    private var active = Source.MESSENGER
+
+    @Volatile
+    private var leftApp = false
     private var capturePending = false
 
     // A chat is only trusted once its title and bubbles have held still; the two load separately.
@@ -58,7 +64,11 @@ class MessengerAccessibilityService : AccessibilityService() {
     private var identifying = false
 
     override fun onAccessibilityEvent(event: AccessibilityEvent) {
-        if (event.packageName?.toString() != MESSENGER_PACKAGE) return
+        val source = Source.of(event.packageName) ?: return
+        if (source != active) {
+            active = source
+            leftApp = true
+        }
         when (event.eventType) {
             AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> windowChanged = true
             AccessibilityEvent.TYPE_VIEW_SCROLLED -> scrolled = true
@@ -78,7 +88,7 @@ class MessengerAccessibilityService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         connected = true
-        Settings.noteCapture(this, "Dịch vụ Trợ năng vừa chạy, chưa thấy Messenger")
+        Settings.noteCapture(this, "Dịch vụ Trợ năng vừa chạy, chưa thấy app chat nào")
         guarded { goForeground() }
     }
 
@@ -95,7 +105,7 @@ class MessengerAccessibilityService : AccessibilityService() {
         )
         val notification = Notification.Builder(this, CHANNEL)
             .setSmallIcon(R.drawable.ic_launcher_foreground)
-            .setContentTitle("Đang lưu tin Messenger")
+            .setContentTitle("Đang lưu tin")
             .setContentText("Chỉ lưu trên máy này. Chạm để mở.")
             .setContentIntent(open)
             .setOngoing(true)
@@ -127,15 +137,28 @@ class MessengerAccessibilityService : AccessibilityService() {
 
     private fun scanWindow(settled: Boolean = false) {
         if (Settings.isPaused(this)) return
-        val root = messengerRoot()
+        val source = active
+        if (leftApp) {
+            leftApp = false
+            openChat = null
+            lastSeen = emptySet()
+            lastTitle = null
+            entry = null
+        }
+        val root = rootOf(source)
         if (root == null) {
-            if (!windowRead) Settings.noteCapture(this, "Không đọc được cửa sổ Messenger")
+            if (!windowRead) Settings.noteCapture(this, "Không đọc được cửa sổ ${source.label}")
             return
         }
         windowRead = true
 
         val nodes = ArrayList<ScreenNode>()
         collect(root, nodes, 0)
+        if (source == Source.ZALO) {
+            Diagnostics.writeZaloDump(this, nodes)
+            Settings.noteCapture(this, "Zalo: thấy ${nodes.size} mục trên màn hình, chưa đọc tin từ màn hình")
+            return
+        }
         if (Settings.consumeDumpRequest(this)) Diagnostics.writeDump(this, nodes)
         val metrics = resources.displayMetrics
         val parsed = ChatParser.parse(nodes, metrics.widthPixels, metrics.heightPixels)
@@ -147,7 +170,7 @@ class MessengerAccessibilityService : AccessibilityService() {
         }
 
         chatRead = true
-        val store = MessageStore.get(this)
+        val store = MessageStore.get(this, source)
         val now = System.currentTimeMillis()
         val title = parsed.conversation
         val seen = parsed.messages.map { it.previousText + "\u0001" + it.text }.toSet()
@@ -176,10 +199,10 @@ class MessengerAccessibilityService : AccessibilityService() {
             // Namesakes can share a sender name, so a private chat's avatar belongs to the chat.
             .map { if (oneToOne) it.copy(owner = thread) else it }
             .distinctBy { it.owner }
-            .filterNot { AvatarStore.has(this, it.owner) }
+            .filterNot { AvatarStore.has(this, source.avatar(it.owner)!!) }
         if (media.isEmpty() && avatars.isEmpty()) return
         if (settled) {
-            capture(media, avatars)
+            capture(media, avatars, source)
         } else if (!capturePending) {
             // Pixels are still sliding during the opening animation, so look again once it has finished.
             capturePending = true
@@ -276,17 +299,17 @@ class MessengerAccessibilityService : AccessibilityService() {
         }
     }
 
-    /** Chat heads and split screen leave Messenger on screen without being the active window. */
-    private fun messengerRoot(): AccessibilityNodeInfo? {
-        val active = rootInActiveWindow
-        if (active?.packageName?.toString() == MESSENGER_PACKAGE) return active
+    /** Chat heads and split screen leave the app on screen without being the active window. */
+    private fun rootOf(source: Source): AccessibilityNodeInfo? {
+        val focused = rootInActiveWindow
+        if (focused?.packageName?.toString() == source.packageName) return focused
         return windows.firstNotNullOfOrNull { window ->
-            window.root?.takeIf { it.packageName?.toString() == MESSENGER_PACKAGE }
+            window.root?.takeIf { it.packageName?.toString() == source.packageName }
         }
     }
 
     /** Nothing exposes these images directly, so they are cropped from a screenshot that is never stored. */
-    private fun capture(media: List<Pair<Long, ScreenNode>>, avatars: List<ScreenAvatar>) {
+    private fun capture(media: List<Pair<Long, ScreenNode>>, avatars: List<ScreenAvatar>, source: Source) {
         val callback = object : TakeScreenshotCallback {
             override fun onSuccess(result: ScreenshotResult) = guarded {
                 val buffer = result.hardwareBuffer
@@ -294,17 +317,17 @@ class MessengerAccessibilityService : AccessibilityService() {
                     ?.copy(Bitmap.Config.ARGB_8888, false)
                 buffer.close()
                 // The user may have switched apps since the scan; never crop another app's screen.
-                val root = rootInActiveWindow?.takeIf { it.packageName?.toString() == MESSENGER_PACKAGE }
+                val root = rootInActiveWindow?.takeIf { it.packageName?.toString() == source.packageName }
                 if (shot != null && root != null) {
                     // The picture was taken after the scan; a list that moved meanwhile would crop the wrong spot.
                     val current = ArrayList<ScreenNode>().also { collect(root, it, 0) }.toSet()
                     avatars.filter { it.node in current }.forEach { avatar ->
                         crop(shot, avatar.node)?.takeIf(::isAvatar)?.let {
-                            AvatarStore.save(this@MessengerAccessibilityService, avatar.owner, it)
+                            AvatarStore.save(this@MessengerAccessibilityService, source.avatar(avatar.owner)!!, it)
                         }
                     }
                     media.filter { it.second in current }.forEach { (id, node) ->
-                        crop(shot, node)?.let { MediaStoreFiles.save(this@MessengerAccessibilityService, id, it) }
+                        crop(shot, node)?.let { MediaStoreFiles.save(this@MessengerAccessibilityService, id, it, source) }
                     }
                 }
             }

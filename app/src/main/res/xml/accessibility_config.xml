@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- packageNames limits the service to Messenger, so no other app's screen is ever read. -->
+<!-- packageNames limits the service to Messenger and Zalo, so no other app's screen is ever read. -->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
     android:accessibilityEventTypes="typeWindowContentChanged|typeWindowStateChanged|typeViewScrolled"
     android:accessibilityFeedbackType="feedbackGeneric"
@@ -8,4 +8,4 @@
     android:canTakeScreenshot="true"
     android:description="@string/accessibility_description"
     android:notificationTimeout="300"
-    android:packageNames="com.facebook.orca" />
+    android:packageNames="com.facebook.orca,com.zing.zalo" />

@@ -1,6 +1,6 @@
-# Lưu tin Messenger
+# Lưu tin
 
-App Android lưu tin Messenger đã nhận và đã gửi của chính bạn vào máy. Dữ liệu chỉ nằm trên
+App Android lưu tin Messenger và Zalo đã nhận và đã gửi của chính bạn vào máy, mỗi app một chế độ. Dữ liệu chỉ nằm trên
 điện thoại: app không có quyền Internet và tắt sao lưu đám mây. Muốn lấy dữ liệu ra thì dùng
 nút **Xuất JSON**. Giao diện luôn ở nền tối, theo màu của Messenger bản tối.
 
@@ -36,6 +36,24 @@ màn hình chỉ dùng để cắt avatar rồi bỏ, không lưu lại. Chưa c
 
 Khi cập nhật từ bản 0.1, dữ liệu cũ được giữ và tự làm sạch. Nếu avatar không hiện, tắt rồi bật
 lại Trợ năng để app nhận quyền chụp màn hình.
+
+## Sao lưu
+
+App tự sao lưu mỗi 6 giờ nếu có tin mới, vào `Download/LuuTinBackup`, giữ 5 bản mới nhất. Mỗi bản là
+một file zip gồm cơ sở dữ liệu, JSON, ảnh và avatar của cả hai chế độ, không mã hoá, nên đừng chia sẻ
+file này. Android có thể dời lịch khi tiết kiệm pin. ⚙ > Sao lưu ngay chạy tức thì, ⚙ > Khôi phục từ
+bản sao lưu thay toàn bộ dữ liệu hiện có. Thư mục này vẫn còn sau khi gỡ app.
+
+## Link và tệp
+
+Tab Link và tệp liệt kê mọi tin có đường dẫn hoặc tệp; chạm để mở link, nhấn giữ để vào đoạn chat.
+Messenger và Zalo không cho app khác biết địa chỉ tải tệp, nên app chỉ tự lưu được tệp khi thông báo
+có kèm tệp. Còn lại app lưu tên tệp, không có nội dung tệp.
+
+## Zalo
+
+Tin Zalo hiện được lưu từ thông báo, nên chỉ có tin nhận khi Zalo có hiện thông báo. Tin đã gửi và đọc
+từ màn hình chưa hoạt động với Zalo.
 
 ## Khi không lưu được tin
 

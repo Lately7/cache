@@ -39,12 +39,17 @@ class MainActivity : Activity() {
     private lateinit var panelStatus: TextView
     private lateinit var search: EditText
     private lateinit var empty: TextView
+    private lateinit var modes: LinearLayout
+    private lateinit var tabs: LinearLayout
+    private var source = Source.MESSENGER
+    private var showLinks = false
     private val adapter = RowAdapter()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         requestWindowFeature(Window.FEATURE_NO_TITLE)
-        store = MessageStore.get(this)
+        source = Settings.mode(this)
+        store = MessageStore.get(this, source)
         colors = Palette(this)
 
         val root = LinearLayout(this).apply {
@@ -53,10 +58,17 @@ class MainActivity : Activity() {
             setBackgroundColor(colors.background)
         }
         root.addView(header())
+        modes = pills(Source.entries.map { it.label }) { index ->
+            source = Source.entries[index]
+            Settings.setMode(this, source)
+            store = MessageStore.get(this, source)
+            refresh()
+        }
+        root.addView(modes, margins(dp(16), 0, dp(16), dp(10)))
         banner = TextView(this).apply {
             textSize = 14f
-            setTextColor(colors.onBubbleOut)
-            background = rounded(colors.bubbleOut, 14)
+            setTextColor(colors.text)
+            background = rounded(colors.surface, 14)
             setPadding(dp(14), dp(10), dp(14), dp(10))
             setOnClickListener { togglePanel(true) }
         }
@@ -71,7 +83,9 @@ class MainActivity : Activity() {
             setTextColor(colors.text)
             setHintTextColor(colors.muted)
             background = rounded(colors.field, 20)
-            setPadding(dp(16), dp(9), dp(16), dp(9))
+            setPadding(dp(14), dp(9), dp(16), dp(9))
+            setCompoundDrawablesRelativeWithIntrinsicBounds(R.drawable.ic_search, 0, 0, 0)
+            compoundDrawablePadding = dp(8)
             addTextChangedListener(object : TextWatcher {
                 override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) = Unit
                 override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) = Unit
@@ -79,6 +93,11 @@ class MainActivity : Activity() {
             })
         }
         root.addView(search, margins(dp(16), 0, dp(16), dp(10)))
+        tabs = pills(listOf("Đoạn chat", "Link và tệp")) { index ->
+            showLinks = index == 1
+            refresh()
+        }
+        root.addView(tabs, margins(dp(16), 0, dp(16), dp(10)))
 
         root.addView(divider(colors))
 
@@ -95,15 +114,13 @@ class MainActivity : Activity() {
                 adapter = this@MainActivity.adapter
                 divider = null
                 setOnItemLongClickListener { _, _, position, _ ->
-                    confirmDeleteChat(this@MainActivity.adapter.getItem(position).conversation)
+                    val row = this@MainActivity.adapter.getItem(position)
+                    if (row.link == null) confirmDeleteChat(row.conversation) else openConversation(row.conversation)
                     true
                 }
                 setOnItemClickListener { _, _, position, _ ->
                     val row = this@MainActivity.adapter.getItem(position)
-                    startActivity(
-                        Intent(this@MainActivity, ConversationActivity::class.java)
-                            .putExtra(ConversationActivity.EXTRA_NAME, row.conversation),
-                    )
+                    if (row.link == null) openConversation(row.conversation) else openLink(row.link)
                 }
             },
             LinearLayout.LayoutParams(-1, 0, 1f),
@@ -126,6 +143,51 @@ class MainActivity : Activity() {
         super.onActivityResult(requestCode, resultCode, data)
         val uri = data?.data
         if (requestCode == REQUEST_EXPORT && resultCode == RESULT_OK && uri != null) export(uri)
+        if (requestCode == REQUEST_RESTORE && resultCode == RESULT_OK && uri != null) confirmRestore(uri)
+    }
+
+    private fun openConversation(conversation: String) {
+        startActivity(
+            Intent(this, ConversationActivity::class.java)
+                .putExtra(ConversationActivity.EXTRA_NAME, conversation)
+                .putExtra(ConversationActivity.EXTRA_SOURCE, source.ordinal),
+        )
+    }
+
+    private fun openLink(link: String) {
+        try {
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(link)))
+        } catch (_: android.content.ActivityNotFoundException) {
+            Toast.makeText(this, "Không có app nào mở được liên kết này", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    /** A row of equal choices, the chosen one filled in white. */
+    private fun pills(labels: List<String>, onPick: (Int) -> Unit) = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        background = rounded(colors.surface, 18)
+        setPadding(dp(3), dp(3), dp(3), dp(3))
+        labels.forEachIndexed { index, label ->
+            addView(
+                TextView(context).apply {
+                    text = label
+                    textSize = 14f
+                    gravity = Gravity.CENTER
+                    typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+                    setPadding(0, dp(7), 0, dp(7))
+                    setOnClickListener { onPick(index) }
+                },
+                LinearLayout.LayoutParams(0, -2, 1f),
+            )
+        }
+    }
+
+    private fun showPicked(row: LinearLayout, picked: Int) {
+        for (i in 0 until row.childCount) {
+            val pill = row.getChildAt(i) as TextView
+            pill.background = if (i == picked) rounded(colors.onBubbleOut, 15) else null
+            pill.setTextColor(if (i == picked) colors.background else colors.muted)
+        }
     }
 
     private fun header() = LinearLayout(this).apply {
@@ -142,14 +204,7 @@ class MainActivity : Activity() {
             LinearLayout.LayoutParams(0, -2, 1f),
         )
         addView(
-            TextView(context).apply {
-                text = "⚙"
-                textSize = 22f
-                gravity = Gravity.CENTER
-                setTextColor(colors.text)
-                contentDescription = "Cài đặt"
-                setOnClickListener { togglePanel(panel.visibility != View.VISIBLE) }
-            },
+            iconButton(R.drawable.ic_tune, "Cài đặt", colors.text) { togglePanel(panel.visibility != View.VISIBLE) },
             LinearLayout.LayoutParams(dp(44), dp(44)),
         )
     }
@@ -170,6 +225,8 @@ class MainActivity : Activity() {
         addView(action("Bật Trợ năng") {
             startActivity(Intent(SystemSettings.ACTION_ACCESSIBILITY_SETTINGS))
         })
+        addView(action("Sao lưu ngay") { backupNow() })
+        addView(action("Khôi phục từ bản sao lưu") { startRestore() })
         addView(action("Xuất JSON") { startExport() })
         addView(action("Xoá tất cả") { confirmDelete() })
         addView(action("Xem lỗi gần nhất") { showText("Lỗi gần nhất", Diagnostics.lastError(context)) })
@@ -195,7 +252,7 @@ class MainActivity : Activity() {
     private fun action(label: String, onClick: () -> Unit) = TextView(this).apply {
         text = label
         textSize = 15f
-        setTextColor(colors.bubbleOut)
+        setTextColor(colors.text)
         setPadding(0, dp(10), 0, dp(10))
         setOnClickListener { onClick() }
     }
@@ -204,7 +261,58 @@ class MainActivity : Activity() {
         panel.visibility = if (open) View.VISIBLE else View.GONE
     }
 
+    private fun backupNow() {
+        Toast.makeText(this, "Đang sao lưu...", Toast.LENGTH_SHORT).show()
+        Thread {
+            val message = try {
+                Backup.run(this, force = true)
+                "Đã sao lưu vào Download/LuuTinBackup"
+            } catch (e: java.io.IOException) {
+                "Sao lưu thất bại: ${e.message}"
+            } catch (e: RuntimeException) {
+                "Sao lưu thất bại: ${e.message}"
+            }
+            runOnUiThread {
+                Toast.makeText(this, message, Toast.LENGTH_LONG).show()
+                refresh()
+            }
+        }.start()
+    }
+
+    private fun startRestore() {
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("application/zip")
+        @Suppress("DEPRECATION")
+        startActivityForResult(intent, REQUEST_RESTORE)
+    }
+
+    private fun confirmRestore(uri: Uri) {
+        AlertDialog.Builder(this)
+            .setTitle("Khôi phục từ bản sao lưu?")
+            .setMessage("Toàn bộ tin hiện có của cả Messenger và Zalo sẽ được thay bằng nội dung trong bản sao lưu. Không thể hoàn tác.")
+            .setPositiveButton("Khôi phục") { _, _ ->
+                Thread {
+                    val message = try {
+                        Backup.restore(this, uri)
+                        "Đã khôi phục"
+                    } catch (e: java.io.IOException) {
+                        "Khôi phục thất bại: ${e.message}"
+                    } catch (e: RuntimeException) {
+                        "Khôi phục thất bại: ${e.message}"
+                    }
+                    runOnUiThread {
+                        store = MessageStore.get(this, source)
+                        Toast.makeText(this, message, Toast.LENGTH_LONG).show()
+                        refresh()
+                    }
+                }.start()
+            }
+            .setNegativeButton("Huỷ", null)
+            .show()
+    }
+
     private fun refresh() {
+        showPicked(modes, source.ordinal)
+        showPicked(tabs, if (showLinks) 1 else 0)
         val notifications = isListenerEnabled()
         val accessibility = isAccessibilityEnabled()
         val rows = store.conversations()
@@ -230,18 +338,28 @@ class MainActivity : Activity() {
             append("\nLần đọc màn hình cuối: ")
             append(if (capture == null) "chưa có" else "${stamp(Settings.lastCaptureAt(this@MainActivity))}, $capture")
             val notified = Settings.lastNotificationAt(this@MainActivity)
-            append("\nThông báo Messenger cuối: ").append(if (notified == 0L) "chưa có" else stamp(notified))
+            append("\nThông báo cuối: ").append(if (notified == 0L) "chưa có" else stamp(notified))
+            val backedUp = Settings.backupAt(this@MainActivity)
+            append("\nSao lưu cuối: ").append(if (backedUp == 0L) "chưa có" else stamp(backedUp))
+            append(" (tự động mỗi 6 giờ)")
         }
 
         val term = search.text.toString().trim()
-        adapter.rows = if (term.isEmpty()) {
-            rows.map { Row(it.name, it.peer, (if (it.lastOutgoing) "Bạn: " else "") + it.lastBody, it.lastAt) }
-        } else {
-            store.search(term).map { Row(it.conversation, it.sender, it.body, it.timestamp) }
+        adapter.rows = when {
+            showLinks -> store.linksAndFiles()
+                .filter { term.isEmpty() || it.body.contains(term, ignoreCase = true) }
+                .map { Row(it.conversation, it.sender, it.body.replace('\n', ' '), it.timestamp, ChatParser.findLink(it.body)) }
+            term.isEmpty() -> rows.map { Row(it.name, it.peer, (if (it.lastOutgoing) "Bạn: " else "") + it.lastBody, it.lastAt) }
+            else -> store.search(term).map { Row(it.conversation, it.sender, it.body, it.timestamp) }
         }
         adapter.notifyDataSetChanged()
         empty.visibility = if (adapter.rows.isEmpty()) View.VISIBLE else View.GONE
-        empty.text = if (term.isEmpty()) "Chưa có tin nào. Mở một đoạn chat trong Messenger để bắt đầu lưu." else "Không tìm thấy tin nào."
+        empty.text = when {
+            term.isNotEmpty() -> "Không tìm thấy tin nào."
+            showLinks -> "Chưa có link hoặc tệp nào."
+            source == Source.ZALO -> "Chưa có tin Zalo nào. Tin nhận được sẽ lưu từ thông báo của Zalo."
+            else -> "Chưa có tin nào. Mở một đoạn chat trong Messenger để bắt đầu lưu."
+        }
     }
 
     private fun stamp(time: Long) = SimpleDateFormat("HH:mm:ss dd/MM", Locale.getDefault()).format(Date(time))
@@ -263,7 +381,7 @@ class MainActivity : Activity() {
         val intent = Intent(Intent.ACTION_CREATE_DOCUMENT)
             .addCategory(Intent.CATEGORY_OPENABLE)
             .setType("application/json")
-            .putExtra(Intent.EXTRA_TITLE, "messenger-archive.json")
+            .putExtra(Intent.EXTRA_TITLE, "${source.label.lowercase()}-archive.json")
         @Suppress("DEPRECATION")
         startActivityForResult(intent, REQUEST_EXPORT)
     }
@@ -297,11 +415,11 @@ class MainActivity : Activity() {
 
     private fun confirmDelete() {
         AlertDialog.Builder(this)
-            .setTitle("Xoá toàn bộ tin đã lưu?")
+            .setTitle("Xoá toàn bộ tin ${source.label} đã lưu?")
             .setMessage("Không thể hoàn tác. Nên xuất JSON trước.")
             .setPositiveButton("Xoá") { _, _ ->
                 store.deleteAll()
-                MediaStoreFiles.deleteAll(this)
+                MediaStoreFiles.deleteAll(this, source)
                 AvatarStore.deleteAll(this)
                 refresh()
             }
@@ -314,8 +432,8 @@ class MainActivity : Activity() {
             .setTitle("Xoá đoạn chat \"$conversation\"?")
             .setMessage("Không thể hoàn tác. Mở lại đoạn chat trong Messenger thì app lưu lại những tin còn hiện trên màn hình.")
             .setPositiveButton("Xoá") { _, _ ->
-                MediaStoreFiles.delete(this, store.deleteConversation(conversation))
-                AvatarStore.delete(this, conversation)
+                MediaStoreFiles.delete(this, store.deleteConversation(conversation), source)
+                source.avatar(conversation)?.let { AvatarStore.delete(this, it) }
                 refresh()
             }
             .setNegativeButton("Huỷ", null)
@@ -325,7 +443,13 @@ class MainActivity : Activity() {
     private fun margins(left: Int, top: Int, right: Int, bottom: Int) =
         LinearLayout.LayoutParams(-1, -2).apply { setMargins(left, top, right, bottom) }
 
-    private data class Row(val conversation: String, val peer: String?, val preview: String, val time: Long)
+    private data class Row(
+        val conversation: String,
+        val peer: String?,
+        val preview: String,
+        val time: Long,
+        val link: String? = null,
+    )
 
     private class Holder(val avatar: ImageView, val name: TextView, val preview: TextView, val time: TextView)
 
@@ -340,7 +464,7 @@ class MainActivity : Activity() {
             val row = rows[position]
             val view = convertView ?: createRow()
             val holder = view.tag as Holder
-            holder.avatar.setImageBitmap(AvatarStore.load(this@MainActivity, row.conversation, row.peer))
+            holder.avatar.setImageBitmap(AvatarStore.load(this@MainActivity, source.avatar(row.conversation), source.avatar(row.peer)))
             holder.name.text = row.conversation
             holder.preview.text = row.preview
             holder.time.text = shortTime(row.time)
@@ -389,6 +513,7 @@ class MainActivity : Activity() {
     private companion object {
         const val REQUEST_EXPORT = 1
         const val REQUEST_NOTIFICATIONS = 2
+        const val REQUEST_RESTORE = 3
         const val NOTIFICATIONS = "android.permission.POST_NOTIFICATIONS"
     }
 }

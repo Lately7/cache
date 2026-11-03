@@ -20,6 +20,7 @@ class ConversationActivity : Activity() {
     private lateinit var colors: Palette
     private lateinit var name: String
     private var oneToOne = true
+    private var source = Source.MESSENGER
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -28,8 +29,9 @@ class ConversationActivity : Activity() {
             finish()
             return
         }
+        source = Source.entries.getOrElse(intent.getIntExtra(EXTRA_SOURCE, 0)) { Source.MESSENGER }
         colors = Palette(this)
-        val store = MessageStore.get(this)
+        val store = MessageStore.get(this, source)
         val messages = store.messages(name)
         oneToOne = store.isOneToOne(name)
 
@@ -60,18 +62,8 @@ class ConversationActivity : Activity() {
         gravity = Gravity.CENTER_VERTICAL
         setBackgroundColor(colors.background)
         setPadding(dp(4), dp(8), dp(12), dp(8))
-        addView(
-            TextView(context).apply {
-                text = "‹"
-                textSize = 32f
-                setTextColor(colors.bubbleOut)
-                gravity = Gravity.CENTER
-                contentDescription = "Quay lại"
-                setOnClickListener { finish() }
-            },
-            LinearLayout.LayoutParams(dp(44), dp(44)),
-        )
-        addView(avatarView(36).apply { setImageBitmap(AvatarStore.load(context, name, peer)) })
+        addView(iconButton(R.drawable.ic_back, "Quay lại", colors.text) { finish() }, LinearLayout.LayoutParams(dp(44), dp(44)))
+        addView(avatarView(36).apply { setImageBitmap(AvatarStore.load(context, source.avatar(name), source.avatar(peer))) })
         addView(
             TextView(context).apply {
                 text = name
@@ -96,7 +88,7 @@ class ConversationActivity : Activity() {
     )
 
     private fun showPicture(file: String) {
-        val bitmap = MediaStoreFiles.load(this, file) ?: return
+        val bitmap = MediaStoreFiles.load(this, file, source) ?: return
         val view = ImageView(this).apply {
             setImageBitmap(bitmap)
             adjustViewBounds = true
@@ -147,7 +139,8 @@ class ConversationActivity : Activity() {
                 else -> View.VISIBLE
             }
             if (holder.avatar.visibility == View.VISIBLE) {
-                val person = if (oneToOne) arrayOf(name, message.sender) else arrayOf(message.sender, name)
+                val person = (if (oneToOne) arrayOf(name, message.sender) else arrayOf(message.sender, name))
+                    .map(source::avatar).toTypedArray()
                 holder.avatar.setImageBitmap(AvatarStore.load(this@ConversationActivity, *person))
             }
 
@@ -156,16 +149,17 @@ class ConversationActivity : Activity() {
             holder.senderName.visibility = if (showName) View.VISIBLE else View.GONE
             holder.senderName.text = message.sender
 
-            val file = message.media
+            val file = message.media?.takeIf(MediaStoreFiles::isPicture)
             holder.picture.visibility = if (file != null) View.VISIBLE else View.GONE
             if (file != null) {
-                holder.picture.setImageBitmap(MediaStoreFiles.load(this@ConversationActivity, file))
+                holder.picture.setImageBitmap(MediaStoreFiles.load(this@ConversationActivity, file, source))
                 holder.picture.setOnClickListener { showPicture(file) }
             }
             val label = attachmentLabel(message)
             holder.bubble.visibility = if (label != null) View.VISIBLE else View.GONE
-            holder.bubble.text = label
             holder.bubble.setTextColor(if (message.outgoing) colors.onBubbleOut else colors.text)
+            holder.bubble.setLinkTextColor(if (message.outgoing) colors.onBubbleOut else colors.linkIn)
+            holder.bubble.text = label
             val fill = if (message.outgoing) colors.bubbleOut else colors.bubbleIn
             holder.bubble.background = bubble(fill, message.outgoing, joinsAbove, joinsBelow)
             return view
@@ -190,7 +184,7 @@ class ConversationActivity : Activity() {
                 setPadding(dp(13), dp(8), dp(13), dp(8))
                 maxWidth = (resources.displayMetrics.widthPixels * 0.72).toInt()
                 setTextIsSelectable(true)
-                setLinkTextColor(colors.onBubbleOut)
+                autoLinkMask = android.text.util.Linkify.WEB_URLS
             }
             val senderName = TextView(this@ConversationActivity).apply {
                 textSize = 12f
@@ -228,6 +222,7 @@ class ConversationActivity : Activity() {
 
     companion object {
         const val EXTRA_NAME = "name"
+        const val EXTRA_SOURCE = "source"
         private val BLOCK_GAP_MS = TimeUnit.MINUTES.toMillis(30)
     }
 }

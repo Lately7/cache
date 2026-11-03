@@ -50,8 +50,10 @@ object AvatarStore {
 
     fun deleteAll(context: Context) {
         File(context.filesDir, "avatars").deleteRecursively()
-        cache.evictAll()
+        forgetCache()
     }
+
+    fun forgetCache() = cache.evictAll()
 
     fun save(context: Context, name: String, bitmap: Bitmap) {
         val target = file(context, name)

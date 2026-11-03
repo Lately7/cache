@@ -33,8 +33,8 @@ data class Conversation(
     val peer: String?,
 )
 
-class MessageStore private constructor(context: Context) :
-    SQLiteOpenHelper(context, "archive.db", null, 6) {
+class MessageStore private constructor(context: Context, source: Source) :
+    SQLiteOpenHelper(context, source.database, null, 6) {
 
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL(
@@ -480,6 +480,26 @@ class MessageStore private constructor(context: Context) :
         return query("WHERE body LIKE ? ESCAPE '\\' ORDER BY ts DESC LIMIT 500", arrayOf("%$escaped%"))
     }
 
+    /** Changes whenever anything worth backing up does. */
+    fun fingerprint(): String {
+        readableDatabase.rawQuery("SELECT COUNT(*), MAX(id), COUNT(media) FROM messages", null).use { c ->
+            c.moveToFirst()
+            return "${c.getLong(0)}:${c.getLong(1)}:${c.getLong(2)}"
+        }
+    }
+
+    fun snapshot(file: java.io.File) {
+        writableDatabase.execSQL("VACUUM INTO ?", arrayOf(file.path))
+    }
+
+    /** Links and files, newest first; messages that merely mention one are kept out by the link check later. */
+    fun linksAndFiles(): List<Message> = query(
+        """WHERE kind='file' OR body LIKE '%http%' OR body LIKE '%www.%' OR body LIKE '%.%/%'
+           OR body LIKE '%.vn%' OR body LIKE '%.com%' OR body LIKE '%.net%' OR body LIKE '%.org%'
+           ORDER BY ts DESC LIMIT 500""",
+        emptyArray(),
+    ).filter { it.kind == ChatParser.KIND_FILE || ChatParser.findLink(it.body) != null }
+
     fun deleteAll() {
         writableDatabase.delete("messages", null, null)
         writableDatabase.delete("threads", null, null)
@@ -556,12 +576,15 @@ class MessageStore private constructor(context: Context) :
         private const val ONE_MINUTE_MS = 60_000.0
         private const val REPEAT_MARK = '\u0003'
 
-        @Volatile
-        private var instance: MessageStore? = null
+        private val instances = HashMap<Source, MessageStore>()
 
-        fun get(context: Context): MessageStore =
-            instance ?: synchronized(this) {
-                instance ?: MessageStore(context.applicationContext).also { instance = it }
-            }
+        fun get(context: Context, source: Source = Source.MESSENGER): MessageStore = synchronized(instances) {
+            instances.getOrPut(source) { MessageStore(context.applicationContext, source) }
+        }
+
+        fun closeAll() = synchronized(instances) {
+            instances.values.forEach { it.close() }
+            instances.clear()
+        }
     }
 }

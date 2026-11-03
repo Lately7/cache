@@ -28,17 +28,18 @@ class MessengerNotificationListener : NotificationListenerService() {
     }
 
     override fun onNotificationPosted(sbn: StatusBarNotification) {
-        if (sbn.packageName != MESSENGER_PACKAGE || Settings.isPaused(this)) return
+        val source = Source.of(sbn.packageName) ?: return
+        if (Settings.isPaused(this)) return
         // Extras are another app's data; a malformed one must not take the listener down.
         try {
-            handle(sbn)
+            handle(sbn, source)
             Settings.noteNotification(this)
         } catch (e: RuntimeException) {
             Diagnostics.record(this, e)
         }
     }
 
-    private fun handle(sbn: StatusBarNotification) {
+    private fun handle(sbn: StatusBarNotification, source: Source) {
         val notification = sbn.notification
         // Summaries repeat their children; ongoing ones are calls and chat heads.
         if (notification.flags and Notification.FLAG_GROUP_SUMMARY != 0) return
@@ -50,17 +51,20 @@ class MessengerNotificationListener : NotificationListenerService() {
             ?: extras.getCharSequence(Notification.EXTRA_TITLE)?.toString()
             ?: return
 
-        val store = MessageStore.get(this)
+        val store = MessageStore.get(this, source)
         val conversation = store.threadForNotification(title, notification.shortcutId)
-        saveAvatar(conversation, notification.getLargeIcon())
+        saveAvatar(source.avatar(conversation), notification.getLargeIcon())
         val threadId = if (notification.shortcutId == null) "không có mã" else "có mã"
-        Diagnostics.trace(this, "Thông báo $title ($threadId): vào $conversation")
+        val style = if (styled.isNullOrEmpty()) "thường" else "${styled.size} tin"
+        Diagnostics.trace(this, "${source.label} thông báo $title ($threadId, $style, ${notification.category}): vào $conversation")
 
         if (styled.isNullOrEmpty()) {
             // Without message data this may be a missed call or an app prompt rather than a chat.
             if (notification.category != Notification.CATEGORY_MESSAGE) return
             val text = extras.getCharSequence(Notification.EXTRA_TEXT)?.toString() ?: return
-            save(store, conversation, conversation, false, text, sbn.postTime)
+            // Zalo re-posts a notification to update it, and "when" stays the same while postTime does not.
+            val time = notification.`when`.takeIf { it > 0 } ?: sbn.postTime
+            save(store, source, conversation, conversation, false, text, time)
             return
         }
         for (item in styled) {
@@ -69,14 +73,14 @@ class MessengerNotificationListener : NotificationListenerService() {
             val time = bundle.getLong("time", sbn.postTime)
             val person = bundle.getPersonCompat("sender_person")
             val sender = bundle.getCharSequence("sender")?.toString() ?: person?.name?.toString()
-            if (sender != null) saveAvatar(sender, person?.icon)
+            if (sender != null) saveAvatar(source.avatar(sender), person?.icon)
             // MessagingStyle leaves the sender empty for the device owner's own replies.
-            save(store, conversation, sender, sender == null, text, time, bundle)
+            save(store, source, conversation, sender, sender == null, text, time, bundle)
         }
     }
 
-    private fun saveAvatar(name: String, icon: Icon?) {
-        if (icon == null || AvatarStore.has(this, name)) return
+    private fun saveAvatar(name: String?, icon: Icon?) {
+        if (name == null || icon == null || AvatarStore.has(this, name)) return
         // The icon can point at Messenger's private files; an unreadable one just means no avatar yet.
         val drawable = try {
             icon.loadDrawable(this)
@@ -88,6 +92,7 @@ class MessengerNotificationListener : NotificationListenerService() {
 
     private fun save(
         store: MessageStore,
+        source: Source,
         conversation: String,
         sender: String?,
         outgoing: Boolean,
@@ -106,9 +111,7 @@ class MessengerNotificationListener : NotificationListenerService() {
         val message = Message(conversation, sender, outgoing, text, time, "notification", kind)
         val key = ChatParser.notificationKey(conversation, sender, time, text)
         val added = store.insert(message, key)
-        if (added && kind == ChatParser.KIND_IMAGE && uri != null) {
-            store.idForKey(key)?.let { MediaStoreFiles.copy(this, it, uri) }
-        }
+        if (added && uri != null) store.idForKey(key)?.let { MediaStoreFiles.copy(this, it, uri, source, type) }
     }
 
     @Suppress("DEPRECATION")

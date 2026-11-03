@@ -1,13 +1,20 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- A speech bubble drawn as one line, holding a save arrow: chats going into the archive. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
     <path
-        android:fillColor="#FFFFFF"
-        android:pathData="M30,32h48a6,6 0,0 1,6 6v28a6,6 0,0 1,-6 6H50l-14,12V72h-6a6,6 0,0 1,-6 -6V38a6,6 0,0 1,6 -6z" />
+        android:pathData="M54,28a26,26 0 1 1 -13.5,48.2L30,80l3.8,-11.5A26,26 0 0 1 54,28z"
+        android:strokeColor="#FFFFFF"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:strokeWidth="5.5" />
     <path
-        android:fillColor="#0084FF"
-        android:pathData="M38,44h32v5H38zM38,55h22v5H38z" />
+        android:pathData="M54,41v17M46,51l8,8l8,-8M45,66h18"
+        android:strokeColor="#FFFFFF"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:strokeWidth="4.5" />
 </vector>

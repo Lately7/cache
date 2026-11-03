@@ -12,6 +12,7 @@ import java.util.Date
 object Diagnostics {
     private const val ERROR_FILE = "last-error.txt"
     private const val DUMP_FILE = "screen-dump.txt"
+    private const val ZALO_DUMP_FILE = "zalo-dump.txt"
     private const val MAX_TEXT = 60
     private const val TRACE_FILE = "capture-log.txt"
     private const val MAX_TRACE_LINES = 200
@@ -45,12 +46,17 @@ object Diagnostics {
     fun lastError(context: Context) = File(context.filesDir, ERROR_FILE).takeIf { it.exists() }?.readText()
 
     /** Messenger's labels for photos and files are unknown until seen; text is cut short to limit what is copied. */
-    fun writeDump(context: Context, nodes: List<ScreenNode>) {
+    fun writeDump(context: Context, nodes: List<ScreenNode>, name: String = DUMP_FILE) {
         val lines = nodes.joinToString("\n") {
             "${it.className.substringAfterLast('.')}|${it.left},${it.top},${it.right},${it.bottom}|" +
                 "${if (it.editable) "edit" else ""}${if (it.visible) "" else "hidden"}|${it.text.take(MAX_TEXT).replace('\n', ' ')}"
         }
-        File(context.filesDir, DUMP_FILE).writeText(lines)
+        File(context.filesDir, name).writeText(lines)
+    }
+
+    /** Zalo's screen is not yet understood, so what the service sees there is kept for reading over adb. */
+    fun writeZaloDump(context: Context, nodes: List<ScreenNode>) {
+        writeDump(context, nodes, ZALO_DUMP_FILE)
     }
 
     fun lastDump(context: Context) = File(context.filesDir, DUMP_FILE).takeIf { it.exists() }?.readText()
@@ -60,6 +66,7 @@ class App : Application() {
     override fun onCreate() {
         super.onCreate()
         if (Settings.firstRunWithCheckedAvatars(this)) AvatarStore.deleteAll(this)
+        Backup.schedule(this)
         val previous = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { thread, error ->
             Diagnostics.record(this, error)
