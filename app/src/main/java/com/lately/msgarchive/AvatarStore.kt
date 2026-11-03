@@ -22,7 +22,16 @@ object AvatarStore {
     private fun file(context: Context, name: String): File {
         val digest = MessageDigest.getInstance("SHA-256").digest(name.toByteArray())
         val id = digest.joinToString("") { "%02x".format(it) }
-        return File(File(context.filesDir, "avatars"), "$id.png")
+        return File(folder(context, name), "$id.png")
+    }
+
+    private fun folder(context: Context, name: String) =
+        File(context.filesDir, if (Source.ZALO.isOwnAvatar(name)) "avatars-zalo" else "avatars")
+
+    /** Removes every avatar of one app. */
+    fun deleteAll(context: Context, source: Source) {
+        File(context.filesDir, if (source == Source.ZALO) "avatars-zalo" else "avatars").deleteRecursively()
+        forgetCache()
     }
 
     fun has(context: Context, name: String) = file(context, name).exists()
@@ -50,6 +59,7 @@ object AvatarStore {
 
     fun deleteAll(context: Context) {
         File(context.filesDir, "avatars").deleteRecursively()
+        File(context.filesDir, "avatars-zalo").deleteRecursively()
         forgetCache()
     }
 

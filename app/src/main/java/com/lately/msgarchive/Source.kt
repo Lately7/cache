@@ -14,6 +14,9 @@ enum class Source(
     /** The same display name in both apps is usually two different people. */
     fun avatar(name: String?) = name?.let { avatarPrefix + it }
 
+    /** Whether an avatar key, as made by [avatar], belongs to this app. */
+    fun isOwnAvatar(key: String) = avatarPrefix.isNotEmpty() && key.startsWith(avatarPrefix)
+
     companion object {
         fun of(packageName: CharSequence?) = entries.firstOrNull { it.packageName == packageName?.toString() }
     }

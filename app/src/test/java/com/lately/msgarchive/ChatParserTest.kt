@@ -322,6 +322,27 @@ class ChatParserTest {
     )
 
     @Test
+    fun photosInARealChatAreKept() {
+        // From a real Messenger 586 chat: two sent photos around one text bubble, plus the preview icon
+        // and the "Sent" receipt that must not be taken for messages.
+        val nodes = listOf(
+            real("Minh, Thread details", 171, 129, 406, 276),
+            real("Minh", 318, 176, 406, 229, clickable = false),
+            real("Preview photo sent by Minh on Monday at 10:13", 647, 619, 757, 729),
+            real("Sent photo message", 794, 288, 1235, 1164),
+            real("Minh, dep qua$suffix", 845, 1207, 1235, 1317, clickable = false),
+            real("Preview photo sent by Minh on Monday", 647, 1865, 757, 1975),
+            real("Sent photo message", 794, 1430, 1235, 2410),
+            real("Sent 2m ago", 928, 2422, 1198, 2461, clickable = false),
+            real("Type a message", 488, 2514, 1039, 2643, editable = true),
+        )
+        val chat = ChatParser.parse(nodes, realWidth, realHeight)!!
+        assertEquals(listOf("dep qua", "Sent photo message"), chat.messages.map { it.text })
+        assertEquals(listOf(null, ChatParser.KIND_IMAGE), chat.messages.map { it.kind })
+        assertEquals(1, chat.media.size)
+    }
+
+    @Test
     fun linkCardsAndEmojiInARealChatAreKept() {
         val chat = ChatParser.parse(realChat, realWidth, realHeight)!!
         assertEquals("An Binh", chat.conversation)
@@ -371,6 +392,101 @@ class ChatParserTest {
     }
 
     @Test
+    fun zaloDateLineAndReceiptAreNotPartOfTheMessage() {
+        assertEquals(ZaloText("dong y nhe", "02/11/2026", "12:07"), ChatParser.cleanZalo("12:07 02/11/2026 dong y nhe 12:07 Seen"))
+        assertEquals(ZaloText("dong y", null, "23:08"), ChatParser.cleanZalo("dong y 23:08"))
+        assertEquals(ZaloText("tin", "Hôm qua", "08:01"), ChatParser.cleanZalo("08:00 Hôm qua tin 08:01 Đã xem"))
+        assertEquals(ZaloText("See more", "Today", "12:38"), ChatParser.cleanZalo("12:38 Today See more"))
+        assertEquals(ZaloText("", "Hôm nay", "09:00"), ChatParser.cleanZalo("09:00 Hôm nay"))
+    }
+
+    @Test
+    fun zaloMessagesThatOnlyLookLikeDatesStayWhole() {
+        assertEquals("8:00 t2 nhé", ChatParser.cleanZalo("8:00 t2 nhé").body)
+        assertEquals("8:00 thứ hai nhé", ChatParser.cleanZalo("8:00 thứ hai nhé").body)
+        assertEquals("7:30 hôm nay nhé", ChatParser.cleanZalo("7:30 hôm nay nhé").body)
+        assertEquals("10:30 15/11 họp lớp", ChatParser.cleanZalo("10:30 15/11 họp lớp").body)
+        assertEquals("hôm nay đi ăn", ChatParser.cleanZalo("hôm nay đi ăn").body)
+        assertEquals("gặp lúc 12:30 nhé", ChatParser.cleanZalo("gặp lúc 12:30 nhé").body)
+        assertEquals("đã xem chưa", ChatParser.cleanZalo("đã xem chưa").body)
+    }
+
+    @Test
+    fun zaloDateLineGivesTheRealSendTime() {
+        val at = ChatParser.zaloTime("02/11/2026", "12:07", 0)!!
+        val time = java.util.Calendar.getInstance().apply { timeInMillis = at }
+        assertEquals(2026, time.get(java.util.Calendar.YEAR))
+        assertEquals(10, time.get(java.util.Calendar.MONTH))
+        assertEquals(2, time.get(java.util.Calendar.DAY_OF_MONTH))
+        assertEquals(12, time.get(java.util.Calendar.HOUR_OF_DAY))
+        assertNull(ChatParser.zaloTime("T2", "12:07", 0))
+        assertNull(ChatParser.zaloTime("31/02/2026", "10:00", 0))
+        assertNull(ChatParser.zaloTime("28/12", "10:00", 0))
+        assertNull(ChatParser.zaloTime("02/11/2026", "25:07", 0))
+    }
+
+    @Test
+    fun zaloDateLineAppliesToTheRowsBelowIt() {
+        val nodes = listOf(zaloNode("a", 300, 400), zaloNode("b", 400, 500), zaloNode("c", 500, 600))
+        val rows = listOf(
+            ZaloRow("a", nodes[0], null, "02/11/2026", "12:07"),
+            ZaloRow("b", nodes[1], null),
+            ZaloRow("c", nodes[2], null, null, "12:09"),
+        )
+        val chat = ChatParser.zaloChat("X", rows, listOf(true, true, true), 0)
+        assertEquals(listOf(ChatParser.zaloTime("02/11/2026", "12:07", 0), ChatParser.zaloTime("02/11/2026", "12:09", 0)), chat.messages.map { it.sentAt })
+    }
+
+    @Test
+    fun zaloAttachmentRowsFromARealChat() {
+        assertEquals(ZaloTag(null, ChatParser.KIND_IMAGE, "Ảnh"), ChatParser.zaloTag("[Photo]"))
+        assertEquals(ZaloTag("Nguyen Van An", ChatParser.KIND_IMAGE, "Ảnh"), ChatParser.zaloTag("Nguyen Van An [Photo]"))
+        assertEquals(ZaloTag("Tran Thi Lan", ChatParser.KIND_IMAGE, "Nhãn dán"), ChatParser.zaloTag("Tran Thi Lan [Sticker]"))
+        assertEquals(
+            ZaloTag(null, ChatParser.KIND_FILE, "bao cao tuan 2.docx 174.9 MB Downloaded on mobile"),
+            ChatParser.zaloTag("[File] bao cao tuan 2.docx 174.9 MB Downloaded on mobile"),
+        )
+        assertNull(ChatParser.zaloTag("gửi ảnh nhé"))
+        assertNull(ChatParser.zaloTag("Message recalled"))
+        val row = ChatParser.cleanZalo("11:09 26/10/2026 Nguyen Van An [Photo]")
+        assertEquals("Nguyen Van An [Photo]", row.body)
+    }
+
+    @Test
+    fun zaloGroupNamesAreSplitOffAndCarryThroughARun() {
+        val nodes = (0..4).map { zaloNode("r$it", 300 + it * 100, 400 + it * 100) }
+        val rows = listOf(
+            ZaloRow("mo dau", nodes[0], null),
+            ZaloRow("Ảnh", nodes[1], ChatParser.KIND_IMAGE, sender = "Nguyen Van An"),
+            ZaloRow("Nguyen Van An xin chao ca nha", nodes[2], null),
+            ZaloRow("tiep tuc", nodes[3], null),
+            ZaloRow("toi tra loi", nodes[4], null),
+        )
+        // Rows drawn beside the avatar start at the left edge; the rest of a run is indented past it.
+        // Measured on a real chat: 42 px beside the avatar, 144 px for the rest of the run.
+        val spans = listOf(42..600, 42..600, 42..600, 144..600, 144..600)
+        val chat = ChatParser.zaloChat("Nhom", rows, listOf(false, false, false, false, true), 0, false, emptySet(), spans)
+        assertEquals(
+            listOf("Ảnh" to "Nguyen Van An", "xin chao ca nha" to "Nguyen Van An", "tiep tuc" to "Nguyen Van An", "toi tra loi" to null),
+            chat.messages.map { it.text to it.sender },
+        )
+        assertEquals(1, chat.media.size)
+        assertEquals(42, chat.media.single().node.left)
+        assertEquals(600, chat.media.single().node.right)
+        // "An ơi" typed mid-run, away from the avatar, is a message, not a name.
+        val mid = ChatParser.zaloChat(
+            "Nhom",
+            listOf(ZaloRow("x", nodes[0], null), ZaloRow("Nguyen Van An oi", nodes[1], null)),
+            listOf(false, false),
+            0,
+            false,
+            setOf("Nguyen Van An"),
+            listOf(144..600, 144..600),
+        )
+        assertEquals("Nguyen Van An oi", mid.messages.single().text)
+    }
+
+    @Test
     fun zaloSidesMatchWhatARealChatMeasured() {
         assertEquals(false, ChatParser.zaloSide(78, 990, 1260))
         assertEquals(false, ChatParser.zaloSide(144, 1026, 1260))
@@ -395,6 +511,40 @@ class ChatParserTest {
     @Test
     fun zaloListHasNoComposerSoItIsNotAChat() {
         assertNull(ChatParser.parseZalo(zaloChat.filterNot { it.editable }, 1260, 2800))
+    }
+
+    private fun list(canScrollUp: Boolean, visible: Boolean = true) =
+        ScreenNode("", 0, 300, 1080, 2150, className = "androidx.recyclerview.widget.RecyclerView", visible = visible, canScrollUp = canScrollUp)
+
+    @Test
+    fun aHiddenListBehindTheChatDoesNotDecideTheStart() {
+        val nodes = listOf(title, composer, list(false, visible = false), list(true), incoming("Hien, đầu$suffix", 400), outgoing("Minh, chào$suffix", 550))
+        assertEquals(listOf("chào"), ChatParser.parse(nodes, width, height)!!.messages.map { it.text })
+    }
+
+    @Test
+    fun storedZaloTextLosesOnlyTheDateLineAndReceipt() {
+        assertEquals("Đi ăn không?", ChatParser.cleanStoredZalo("08:00 03/11/2026 Đi ăn không?"))
+        assertEquals("Hẹn 10:30", ChatParser.cleanStoredZalo("Hẹn 10:30"))
+        assertEquals("ok", ChatParser.cleanStoredZalo("ok 10:32 Đã nhận"))
+        assertEquals("Ảnh", ChatParser.cleanStoredZalo("23:09 Đã xem"))
+        assertEquals("Ảnh", ChatParser.cleanStoredZalo("09:00 Hôm nay"))
+        assertEquals("8:00 thứ hai nhé", ChatParser.cleanStoredZalo("8:00 thứ hai nhé"))
+    }
+
+    @Test
+    fun firstMessageOfAChatIsKeptAtTheTop() {
+        val nodes = listOf(title, composer, list(false), incoming("Hien, đầu tiên$suffix", 400), outgoing("Minh, chào$suffix", 550))
+        val chat = ChatParser.parse(nodes, width, height)!!
+        assertEquals(listOf(ScreenMessage("đầu tiên", false, "", "Hien"), ScreenMessage("chào", true, "đầu tiên", null)), chat.messages)
+    }
+
+    @Test
+    fun topBubbleWaitsWhileOlderMessagesExist() {
+        val nodes = listOf(title, composer, list(true), incoming("Hien, đầu$suffix", 400), outgoing("Minh, chào$suffix", 550))
+        assertEquals(listOf("chào"), ChatParser.parse(nodes, width, height)!!.messages.map { it.text })
+        val unknown = listOf(title, composer, incoming("Hien, đầu$suffix", 400), outgoing("Minh, chào$suffix", 550))
+        assertEquals(listOf("chào"), ChatParser.parse(unknown, width, height)!!.messages.map { it.text })
     }
 
     @Test

@@ -22,7 +22,8 @@ data class Message(
 
 data class SavedScreen(val ids: Map<ScreenMessage, Long>, val added: Int)
 
-data class ThreadMatch(val name: String?, val known: List<String>, val unused: String)
+/** [guessed]: chosen without any matching bubble, so the screen must hold still as long as for an unknown one. */
+data class ThreadMatch(val name: String?, val known: List<String>, val unused: String, val guessed: Boolean = false)
 
 data class Conversation(
     val name: String,
@@ -33,8 +34,8 @@ data class Conversation(
     val peer: String?,
 )
 
-class MessageStore private constructor(context: Context, source: Source) :
-    SQLiteOpenHelper(context, source.database, null, 6) {
+class MessageStore private constructor(context: Context, private val source: Source) :
+    SQLiteOpenHelper(context, source.database, null, VERSION) {
 
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL(
@@ -84,6 +85,60 @@ class MessageStore private constructor(context: Context, source: Source) :
             db.execSQL("CREATE INDEX idx_screen_key ON messages(screen_key)")
         }
         if (oldVersion < 6) createThreads(db)
+        if (oldVersion < 7 && source == Source.ZALO) cleanZaloRows(db)
+    }
+
+    /** Cleans one part of a key, keeping the repeat markers that follow the text. */
+    private fun cleanKeyPart(part: String): String {
+        if (part.isEmpty()) return part
+        val marker = Regex("""[\u0002\u0003]\d+$""").find(part)
+        val text = if (marker == null) part else part.substring(0, marker.range.first)
+        return ChatParser.cleanStoredZalo(text) + (marker?.value ?: "")
+    }
+
+    private fun cleanZaloKey(key: String?): String? {
+        if (key == null) return null
+        val parts = key.split('\u0001').toMutableList()
+        if (parts.size != KEY_PARTS || parts[0] != "screen") return key
+        parts[KEY_PARTS - 2] = cleanKeyPart(parts[KEY_PARTS - 2])
+        parts[KEY_PARTS - 1] = cleanKeyPart(parts[KEY_PARTS - 1])
+        return parts.joinToString("\u0001")
+    }
+
+    /**
+     * 0.5.1 and 0.5.2 kept Zalo's date line and read receipt in the message. Keys hold the text, so they
+     * change too, including the keys notification rows took over from a bubble.
+     */
+    private fun cleanZaloRows(db: SQLiteDatabase) {
+        class Row(val id: Long, val source: String, val body: String, val key: String, val screenKey: String?)
+        val rows = ArrayList<Row>()
+        db.rawQuery("SELECT id, source, body, dedupe_key, screen_key FROM messages", null).use { c ->
+            while (c.moveToNext()) {
+                rows.add(Row(c.getLong(0), c.getString(1), c.getString(2), c.getString(3), if (c.isNull(4)) null else c.getString(4)))
+            }
+        }
+        for (row in rows) {
+            val values = ContentValues().apply {
+                if (row.source == "screen") {
+                    val body = ChatParser.cleanStoredZalo(row.body)
+                    put("body", body)
+                    if (body == "Ảnh" && row.body != "Ảnh") put("kind", ChatParser.KIND_IMAGE)
+                }
+                put("screen_key", cleanZaloKey(row.screenKey))
+            }
+            val key = if (row.source == "screen") cleanZaloKey(row.key)!! else row.key
+            // Two different messages can clean to the same key, such as the same reply on two days.
+            // Never delete one: the later takes the next repeat number, as saveScreen would give it.
+            var candidate = key
+            var repeat = 0
+            while (true) {
+                values.put("dedupe_key", candidate)
+                val updated = db.updateWithOnConflict("messages", values, "id=?", arrayOf(row.id.toString()), SQLiteDatabase.CONFLICT_IGNORE)
+                if (updated > 0) break
+                repeat++
+                candidate = key + REPEAT_MARK + repeat
+            }
+        }
     }
 
     private class OldRow(val id: Long, val conversation: String, val outgoing: Boolean, val body: String)
@@ -152,21 +207,80 @@ class MessageStore private constructor(context: Context, source: Source) :
         above: Double?,
         now: Long,
     ): Known? {
-        val since = now - TimeUnit.DAYS.toMillis(NOTIFICATION_MATCH_DAYS)
+        // Between the bubble above and the next bubble already confirmed below, position ties the row down,
+        // so a week-old notification still counts. Without such a bound only recent ones may stand in.
+        val ceiling = above?.let { mark ->
+            readableDatabase.rawQuery(
+                """SELECT MIN(seq) FROM messages WHERE conversation=? AND seq>?
+                   AND (source='screen' OR screen_key IS NOT NULL)""",
+                arrayOf(conversation, mark.toString()),
+            ).use { if (it.moveToFirst() && !it.isNull(0)) it.getDouble(0) else null }
+        }
+        val since = if (ceiling != null) 0L else now - TimeUnit.DAYS.toMillis(NOTIFICATION_MATCH_DAYS)
+        val top = ceiling?.plus(ONE_MINUTE_MS) ?: Double.MAX_VALUE
         val order = if (above == null) "DESC" else "ASC"
         // Screen rows are stamped when read, a moment after the send time a notification carries.
         val floor = if (above == null) -Double.MAX_VALUE else above - ONE_MINUTE_MS
         readableDatabase.rawQuery(
             """SELECT id, seq, ts FROM messages WHERE conversation=? AND body=? AND outgoing=?
-               AND source='notification' AND screen_key IS NULL AND ts>=? AND seq>?
+               AND source='notification' AND screen_key IS NULL AND ts>=? AND seq>? AND seq<?
                ORDER BY seq $order LIMIT 1""",
-            arrayOf(conversation, item.text, if (item.outgoing) "1" else "0", since.toString(), floor.toString()),
+            arrayOf(
+                conversation,
+                item.text,
+                if (item.outgoing) "1" else "0",
+                since.toString(),
+                floor.toString(),
+                top.toString(),
+            ),
         ).use { c ->
             if (!c.moveToFirst()) return null
             val row = c.toKnown()
             val values = ContentValues().apply { put("screen_key", key) }
             writableDatabase.update("messages", values, "id=?", arrayOf(row.id.toString()))
             return row
+        }
+    }
+
+    /**
+     * A bubble saved as the first of its chat (nothing above it on screen) and later seen with an older
+     * message above it was not the first after all: history was still loading. The row is given the
+     * bubble's real identity instead of a second copy being saved.
+     */
+    private fun adoptStartRow(conversation: String, item: ScreenMessage, key: String, nextKey: String?, used: Set<Long>): Known? {
+        if (item.previousText.isEmpty() || nextKey == null) return null
+        val startKey = ChatParser.screenKey(conversation, item.copy(previousText = ""))
+        val row = occurrences(startKey).firstOrNull { it.id !in used } ?: return null
+        // Only the chat's earliest row, and only when the bubble below it on screen is the row stored right
+        // after it: a later message that happens to repeat the first one has different neighbours.
+        if (before(conversation, row.seq) != null) return null
+        val following = after(conversation, row.seq) ?: return null
+        if (occurrences(nextKey).none { it.id == following.id }) return null
+        val values = ContentValues().apply { put("dedupe_key", key) }
+        val updated = writableDatabase.updateWithOnConflict(
+            "messages",
+            values,
+            "id=? AND dedupe_key=?",
+            arrayOf(row.id.toString(), startKey),
+            SQLiteDatabase.CONFLICT_IGNORE,
+        )
+        return if (updated > 0) row else null
+    }
+
+    /**
+     * A bubble whose neighbour was not recognised before (a photo, a link card) gets a new predecessor and
+     * so a new identity. The stored row right after the nearest known bubble above, with the same text and
+     * side, is that bubble: anything newly seen between them is inserted around it, not saved twice.
+     */
+    private fun sameNextRow(conversation: String, item: ScreenMessage, above: Double, used: Set<Long>): Known? {
+        readableDatabase.rawQuery(
+            "SELECT id, seq, ts, body, outgoing FROM messages WHERE conversation=? AND seq>? ORDER BY seq, id LIMIT 1",
+            arrayOf(conversation, above.toString()),
+        ).use { c ->
+            if (!c.moveToFirst()) return null
+            val row = c.toKnown()
+            val same = c.getString(3) == item.text && (c.getInt(4) == 1) == item.outgoing
+            return row.takeIf { same && it.id !in used }
         }
     }
 
@@ -225,7 +339,12 @@ class MessageStore private constructor(context: Context, source: Source) :
                 // The same two lines can be said again later. Right after a new bubble, a row older than
                 // the bubbles above is that repeat rather than a re-read, so it must not hide the message.
                 if (match != null && mark != null && found.lastOrNull() == null && match.seq <= mark) match = null
-                if (rows.isEmpty()) match = claimNotification(conversation, item, key, above, now)
+                if (match == null) {
+                    val next = items.getOrNull(index + 1)?.let { ChatParser.screenKey(conversation, it) }
+                    match = adoptStartRow(conversation, item, key, next, used)
+                }
+                if (match == null) match = claimNotification(conversation, item, key, above, now)
+                if (match == null && mark != null) match = sameNextRow(conversation, item, mark, used)
                 found.add(match)
                 if (match != null) {
                     keys.add(key)
@@ -302,10 +421,12 @@ class MessageStore private constructor(context: Context, source: Source) :
         }
     }
 
+    /** Chats with this title, including ones known only from a notification link after their rows were deleted. */
     private fun threadsNamed(title: String): List<String> {
         readableDatabase.rawQuery(
-            "SELECT DISTINCT conversation FROM messages WHERE conversation=? OR (conversation>=? AND conversation<?)",
-            arrayOf(title, "$title (", "$title )"),
+            """SELECT conversation FROM messages WHERE conversation=? OR (conversation>=? AND conversation<?)
+               UNION SELECT conversation FROM threads WHERE title=?""",
+            arrayOf(title, "$title (", "$title )", title),
         ).use { c ->
             val out = ArrayList<String>()
             while (c.moveToNext()) out.add(c.getString(0))
@@ -320,7 +441,13 @@ class MessageStore private constructor(context: Context, source: Source) :
     }
 
     private fun overlap(conversation: String, chat: ScreenChat, now: Long): Int {
-        val since = now - TimeUnit.DAYS.toMillis(NOTIFICATION_MATCH_DAYS)
+        // A chat never opened has only notifications, and those of any age are its messages. Once it has been
+        // read from the screen, old unclaimed "ok"s pile up there and would match anyone's "ok".
+        val opened = readableDatabase.rawQuery(
+            "SELECT 1 FROM messages WHERE conversation=? AND source='screen' LIMIT 1",
+            arrayOf(conversation),
+        ).use { it.moveToFirst() }
+        val since = if (opened) now - TimeUnit.DAYS.toMillis(NOTIFICATION_MATCH_DAYS) else 0L
         return chat.messages.count { item ->
             occurrences(ChatParser.screenKey(conversation, item)).isNotEmpty() ||
                 readableDatabase.rawQuery(
@@ -343,9 +470,14 @@ class MessageStore private constructor(context: Context, source: Source) :
         if (known.isEmpty()) return ThreadMatch(title, known, unused)
         if (chat.messages.isEmpty()) return ThreadMatch(known.first(), known, unused)
         val best = known.map { it to overlap(it, chat, now) }.maxBy { it.second }
+        // A group can show one member's messages only. It is that group when everyone writing on screen is
+        // already known as a member of it; anything less goes to the avatar check like any other stranger.
+        val writers = chat.messages.filterNot { it.outgoing }.mapNotNull { it.sender }.filter { it != title }.toSet()
+        val group = if (writers.isEmpty()) null else known.firstOrNull { membersOf(it).containsAll(writers) && !isOneToOne(it, title) }
         return when {
             best.second > 0 -> ThreadMatch(best.first, known, unused)
-            ChatParser.isGroup(chat.messages) -> ThreadMatch(known.first(), known, unused)
+            ChatParser.isGroup(chat.messages) -> ThreadMatch(group ?: known.first(), known, unused)
+            group != null -> ThreadMatch(group, known, unused, guessed = true)
             else -> ThreadMatch(null, known, unused)
         }
     }
@@ -373,11 +505,23 @@ class MessageStore private constructor(context: Context, source: Source) :
     }
 
     /** One-to-one chats show a nickname on bubbles and the full name in notifications; both are one person. */
-    fun isOneToOne(conversation: String): Boolean {
+    fun isOneToOne(conversation: String, title: String = conversation): Boolean {
         readableDatabase.rawQuery(
-            "SELECT COUNT(DISTINCT sender) FROM messages WHERE conversation=? AND outgoing=0 AND sender<>?",
-            arrayOf(conversation, conversation),
+            "SELECT COUNT(DISTINCT sender) FROM messages WHERE conversation=? AND outgoing=0 AND sender NOT IN (?, ?)",
+            arrayOf(conversation, conversation, title),
         ).use { return !it.moveToFirst() || it.getInt(0) <= 1 }
+    }
+
+    /** Senders seen in one chat, other than the chat's own name. */
+    private fun membersOf(conversation: String): Set<String> {
+        readableDatabase.rawQuery(
+            "SELECT DISTINCT sender FROM messages WHERE conversation=? AND outgoing=0 AND sender IS NOT NULL AND sender<>?",
+            arrayOf(conversation, conversation),
+        ).use { c ->
+            val out = HashSet<String>()
+            while (c.moveToNext()) out.add(c.getString(0))
+            return out
+        }
     }
 
     private fun saveRun(
@@ -391,7 +535,12 @@ class MessageStore private constructor(context: Context, source: Source) :
         val upper = visibleUpper ?: lower?.let { after(conversation, it.seq) }
         val seqs: List<Double>
         val time: Long
-        if (upper == null) {
+        val dated = run.mapNotNull { it.sentAt }
+        if (lower == null && visibleUpper == null && dated.size == run.size) {
+            // Nothing on screen is stored yet, so position says nothing; Zalo's own send times place the block.
+            seqs = run.mapIndexed { i, item -> item.sentAt!! + i * SAME_MINUTE_STEP }
+            time = now
+        } else if (upper == null) {
             val base = maxOf(now.toDouble(), (lastSeq(conversation) ?: 0.0) + 1)
             seqs = run.indices.map { base + it }
             time = now
@@ -404,7 +553,7 @@ class MessageStore private constructor(context: Context, source: Source) :
             time = upper.ts
         }
         run.forEachIndexed { i, item ->
-            val message = Message(conversation, item.sender, item.outgoing, item.text, time, "screen", item.kind)
+            val message = Message(conversation, item.sender, item.outgoing, item.text, item.sentAt ?: time, "screen", item.kind)
             insert(message, keys[i], seqs[i])
         }
     }
@@ -482,9 +631,16 @@ class MessageStore private constructor(context: Context, source: Source) :
 
     /** Changes whenever anything worth backing up does. */
     fun fingerprint(): String {
-        readableDatabase.rawQuery("SELECT COUNT(*), MAX(id), COUNT(media) FROM messages", null).use { c ->
+        // Ids are reused after a delete, so sums are kept too; a moved row changes TOTAL(seq).
+        readableDatabase.rawQuery(
+            // Formatted in SQL: Android turns a REAL into text with only six significant digits.
+            """SELECT printf('%d:%d:%.6f:%d:%d', COUNT(*), TOTAL(id), TOTAL(seq), COUNT(media),
+                      (SELECT COUNT(*) FROM threads))
+               FROM messages""",
+            null,
+        ).use { c ->
             c.moveToFirst()
-            return "${c.getLong(0)}:${c.getLong(1)}:${c.getLong(2)}"
+            return c.getString(0)
         }
     }
 
@@ -499,6 +655,35 @@ class MessageStore private constructor(context: Context, source: Source) :
            ORDER BY ts DESC LIMIT 500""",
         emptyArray(),
     ).filter { it.kind == ChatParser.KIND_FILE || ChatParser.findLink(it.body) != null }
+
+    /** Group members already seen in chats with this title, to split a name off the front of a Zalo row. */
+    fun senders(title: String): Set<String> {
+        readableDatabase.rawQuery(
+            """SELECT DISTINCT sender FROM messages WHERE sender IS NOT NULL AND sender<>conversation
+               AND (conversation=? OR (conversation>=? AND conversation<?))""",
+            arrayOf(title, "$title (", "$title )"),
+        ).use { c ->
+            val out = HashSet<String>()
+            while (c.moveToNext()) out.add(c.getString(0))
+            return out
+        }
+    }
+
+    fun isEmpty(): Boolean {
+        readableDatabase.rawQuery("SELECT 1 FROM messages LIMIT 1", null).use { return !it.moveToFirst() }
+    }
+
+    /** Every name an avatar can be stored under in this archive. */
+    fun names(): List<String> {
+        readableDatabase.rawQuery(
+            "SELECT conversation FROM messages UNION SELECT sender FROM messages WHERE sender IS NOT NULL",
+            null,
+        ).use { c ->
+            val out = ArrayList<String>()
+            while (c.moveToNext()) out.add(c.getString(0))
+            return out
+        }
+    }
 
     fun deleteAll() {
         writableDatabase.delete("messages", null, null)
@@ -515,7 +700,7 @@ class MessageStore private constructor(context: Context, source: Source) :
             while (c.moveToNext()) files.add(c.getString(0))
         }
         writableDatabase.delete("messages", "conversation=?", arrayOf(conversation))
-        writableDatabase.delete("threads", "conversation=?", arrayOf(conversation))
+        // The notification link is kept: dropping it would hand this person's next message to a namesake.
         return files
     }
 
@@ -574,6 +759,9 @@ class MessageStore private constructor(context: Context, source: Source) :
     companion object {
         private const val NOTIFICATION_MATCH_DAYS = 7L
         private const val ONE_MINUTE_MS = 60_000.0
+        const val VERSION = 7
+        private const val KEY_PARTS = 5
+        private const val SAME_MINUTE_STEP = 0.001
         private const val REPEAT_MARK = '\u0003'
 
         private val instances = HashMap<Source, MessageStore>()

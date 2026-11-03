@@ -146,12 +146,67 @@ class StoreCheck : Instrumentation() {
         zalo.deleteAll()
         if (Backup.run(targetContext) == null) failures.add("changed archive was not backed up")
         if (Backup.run(targetContext) != null) failures.add("unchanged archive was backed up again")
-        Backup.restore(targetContext, backup!!)
+        // Deleting the newest row and adding one with the same id must still count as a change.
+        store.deleteConversation(chat)
+        store.insert(Message(chat, "B", false, "khác", base + 2, "screen"), "b3")
+        store.insert(Message(chat, "B", false, "khác2", base + 3, "screen"), "b4")
+        if (Backup.run(targetContext) == null) failures.add("reused ids hid a change from the backup")
+        Backup.prepareRestore(targetContext, backup!!)
+        MessageStore.closeAll()
+        Backup.applyPendingRestore(targetContext)
         val restored = MessageStore.get(targetContext)
         if (restored.messages(chat).map { it.body } != listOf("trước")) failures.add("restore: ${restored.messages(chat)}")
         if (MessageStore.get(targetContext, Source.ZALO).conversations().size != 1) failures.add("restore lost Zalo")
         MessageStore.get(targetContext, Source.ZALO).deleteAll()
         restored.deleteAll()
+
+        // A file that is not a backup is refused before anything is replaced.
+        val bogus = java.io.File(targetContext.cacheDir, "bogus.zip")
+        java.util.zip.ZipOutputStream(bogus.outputStream()).use { zip ->
+            zip.putNextEntry(java.util.zip.ZipEntry("db/archive.db"))
+            zip.write("not a database".toByteArray())
+            zip.closeEntry()
+        }
+        store.insert(Message(chat, "B", false, "giữ", base, "screen"), "keep1")
+        try {
+            Backup.prepareRestore(targetContext, android.net.Uri.fromFile(bogus))
+            failures.add("bogus backup accepted")
+        } catch (_: java.io.IOException) {
+        }
+        Backup.applyPendingRestore(targetContext)
+        if (MessageStore.get(targetContext).messages(chat).map { it.body } != listOf("giữ")) failures.add("bogus backup touched data")
+        store.deleteAll()
+
+        // A neighbour recognised only now (a photo) gives the next bubble a new predecessor, not a second row.
+        store.deleteAll()
+        screen(base, "x" to "a", "a" to "b", "b" to "c")
+        screen(base + 1000, "x" to "a", "a" to "Ảnh", "Ảnh" to "b", "b" to "c")
+        expect("bubble after a newly seen photo is not doubled", listOf("a", "Ảnh", "b", "c"))
+
+        // A bubble saved as a chat's first message is the same row once older history loads above it.
+        store.deleteAll()
+        screen(base, "" to "đầu")
+        screen(base + 1000, "" to "đầu", "đầu" to "hai")
+        screen(base + 2000, "cũ" to "đầu", "đầu" to "hai")
+        expect("start row adopted, not doubled", listOf("đầu", "hai"))
+        // A later message repeating the first one is a new message.
+        screen(base + 3000, "đầu" to "hai", "hai" to "đầu")
+        expect("repeat of the first message is kept", listOf("đầu", "hai", "đầu"))
+
+        // A bubble between two stored ones cannot take a notification from long after them.
+        store.deleteAll()
+        screen(base, "x" to "a", "a" to "b")
+        store.insert(Message(chat, "B", false, "ok", base + 10 * 86_400_000L, "notification"), "late")
+        screen(base + 11 * 86_400_000L, "x" to "a", "a" to "ok")
+        expect("old ok is its own row", listOf("a", "ok", "b", "ok"))
+
+        // A Zalo block read with nothing known around it is placed by its send time, not appended.
+        store.deleteAll()
+        fun dated(text: String, previous: String, at: Long) = ScreenMessage(text, false, previous, "B", null, at)
+        store.saveScreen(ScreenChat(chat, listOf(dated("mới1", "x", base + 5000), dated("mới2", "mới1", base + 6000))), base + 7000)
+        store.saveScreen(ScreenChat(chat, listOf(dated("cũ1", "y", base + 1000), dated("cũ2", "cũ1", base + 2000))), base + 8000)
+        expect("older block sorts first", listOf("cũ1", "cũ2", "mới1", "mới2"))
+        store.deleteAll()
 
         // Hostile text must survive storage and search unchanged.
         store.deleteAll()

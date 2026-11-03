@@ -5,7 +5,8 @@ import android.content.Context
 object Settings {
     private const val PREFS = "settings"
     private const val KEY_PAUSED = "paused"
-    private const val KEY_DUMP = "dump_requested"
+    private const val KEY_DUMP = "dump_until"
+    private const val DUMP_WINDOW_MS = 180_000L
     private const val KEY_AVATARS_CHECKED = "avatars_checked"
     private const val KEY_MODE = "mode"
     private const val KEY_BACKUP_STATE = "backup_state"
@@ -62,13 +63,9 @@ object Settings {
     }
 
     fun requestDump(context: Context) {
-        prefs(context).edit().putBoolean(KEY_DUMP, true).apply()
+        prefs(context).edit().putLong(KEY_DUMP, System.currentTimeMillis() + DUMP_WINDOW_MS).apply()
     }
 
-    /** One-shot, so a screen dump can never keep running in the background. */
-    fun consumeDumpRequest(context: Context): Boolean {
-        if (!prefs(context).getBoolean(KEY_DUMP, false)) return false
-        prefs(context).edit().putBoolean(KEY_DUMP, false).apply()
-        return true
-    }
+    /** Time-limited, so a screen dump can never keep running in the background. */
+    fun isDumping(context: Context) = System.currentTimeMillis() < prefs(context).getLong(KEY_DUMP, 0L)
 }

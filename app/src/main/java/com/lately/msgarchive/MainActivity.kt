@@ -32,7 +32,8 @@ import java.util.Date
 import java.util.Locale
 
 class MainActivity : Activity() {
-    private lateinit var store: MessageStore
+    // Fetched each time: a cached store would keep pointing at files a restore has replaced.
+    private val store: MessageStore get() = MessageStore.get(this, source)
     private lateinit var colors: Palette
     private lateinit var banner: TextView
     private lateinit var panel: LinearLayout
@@ -49,7 +50,6 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
         requestWindowFeature(Window.FEATURE_NO_TITLE)
         source = Settings.mode(this)
-        store = MessageStore.get(this, source)
         colors = Palette(this)
 
         val root = LinearLayout(this).apply {
@@ -61,7 +61,6 @@ class MainActivity : Activity() {
         modes = pills(Source.entries.map { it.label }) { index ->
             source = Source.entries[index]
             Settings.setMode(this, source)
-            store = MessageStore.get(this, source)
             refresh()
         }
         root.addView(modes, margins(dp(16), 0, dp(16), dp(10)))
@@ -135,6 +134,8 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        // A staged restore only applies at process start; one left pending would later wipe newer messages.
+        if (Backup.restorePending(this)) android.os.Process.killProcess(android.os.Process.myPid())
         refresh()
     }
 
@@ -232,8 +233,9 @@ class MainActivity : Activity() {
         addView(action("Xem lỗi gần nhất") { showText("Lỗi gần nhất", Diagnostics.lastError(context)) })
         addView(action("Xem nhật ký lưu tin") { showText("Nhật ký lưu tin", Diagnostics.traceLog(context)) })
         addView(action("Ghi cấu trúc màn hình app chat") {
+            Diagnostics.clearDump(context)
             Settings.requestDump(context)
-            Toast.makeText(context, "Mở một đoạn chat trong Messenger hoặc Zalo, rồi quay lại bấm Xem cấu trúc", Toast.LENGTH_LONG).show()
+            Toast.makeText(context, "Trong 3 phút tới, mở và cuộn các đoạn chat có ảnh, link, tệp", Toast.LENGTH_LONG).show()
         })
         addView(action("Xem cấu trúc đã ghi") { showText("Cấu trúc màn hình", Diagnostics.lastDump(context)) })
         addView(Switch(context).apply {
@@ -288,22 +290,26 @@ class MainActivity : Activity() {
     private fun confirmRestore(uri: Uri) {
         AlertDialog.Builder(this)
             .setTitle("Khôi phục từ bản sao lưu?")
-            .setMessage("Toàn bộ tin hiện có của cả Messenger và Zalo sẽ được thay bằng nội dung trong bản sao lưu. Không thể hoàn tác.")
+            .setMessage(
+                "Toàn bộ tin hiện có của cả Messenger và Zalo sẽ được thay bằng nội dung trong bản sao lưu. " +
+                    "App sẽ tự đóng; mở lại app để xem dữ liệu đã khôi phục. Không thể hoàn tác.",
+            )
             .setPositiveButton("Khôi phục") { _, _ ->
                 Thread {
-                    val message = try {
-                        Backup.restore(this, uri)
-                        "Đã khôi phục"
+                    val failure = try {
+                        Backup.prepareRestore(this, uri)
+                        null
                     } catch (e: java.io.IOException) {
-                        "Khôi phục thất bại: ${e.message}"
+                        e.message
                     } catch (e: RuntimeException) {
-                        "Khôi phục thất bại: ${e.message}"
+                        e.message
                     }
-                    runOnUiThread {
-                        store = MessageStore.get(this, source)
-                        Toast.makeText(this, message, Toast.LENGTH_LONG).show()
-                        refresh()
+                    if (failure == null) {
+                        // Waiting on a dialog lets capture keep writing to the old archive, which the staged
+                        // restore would later replace silently. The confirmation already said the app closes.
+                        android.os.Process.killProcess(android.os.Process.myPid())
                     }
+                    runOnUiThread { Toast.makeText(this, "Khôi phục thất bại: $failure", Toast.LENGTH_LONG).show() }
                 }.start()
             }
             .setNegativeButton("Huỷ", null)
@@ -387,17 +393,20 @@ class MainActivity : Activity() {
     }
 
     private fun export(uri: Uri) {
-        val message = try {
-            val stream = contentResolver.openOutputStream(uri) ?: throw java.io.IOException("không mở được file")
-            val count = stream.writer().use { store.exportJson(it) }
-            "Đã xuất $count tin"
-        } catch (e: java.io.IOException) {
-            "Xuất thất bại: ${e.message}"
-        } catch (e: RuntimeException) {
-            // The chosen location belongs to another app, whose provider can refuse in its own way.
-            "Xuất thất bại: ${e.message}"
-        }
-        Toast.makeText(this, message, Toast.LENGTH_LONG).show()
+        val archive = store
+        Thread {
+            val message = try {
+                val stream = contentResolver.openOutputStream(uri) ?: throw java.io.IOException("không mở được file")
+                val count = stream.writer().use { archive.exportJson(it) }
+                "Đã xuất $count tin"
+            } catch (e: java.io.IOException) {
+                "Xuất thất bại: ${e.message}"
+            } catch (e: RuntimeException) {
+                // The chosen location belongs to another app, whose provider can refuse in its own way.
+                "Xuất thất bại: ${e.message}"
+            }
+            runOnUiThread { Toast.makeText(this, message, Toast.LENGTH_LONG).show() }
+        }.start()
     }
 
     private fun showText(title: String, text: String?) {
@@ -418,9 +427,11 @@ class MainActivity : Activity() {
             .setTitle("Xoá toàn bộ tin ${source.label} đã lưu?")
             .setMessage("Không thể hoàn tác. Nên xuất JSON trước.")
             .setPositiveButton("Xoá") { _, _ ->
-                store.deleteAll()
+                // Only this app's avatars: the other app's are needed to tell its namesakes apart.
+                AvatarStore.deleteAll(this, source)
+                // Files before rows: a message arriving in between keeps both or loses both, never a dead link.
                 MediaStoreFiles.deleteAll(this, source)
-                AvatarStore.deleteAll(this)
+                store.deleteAll()
                 refresh()
             }
             .setNegativeButton("Huỷ", null)
@@ -430,7 +441,7 @@ class MainActivity : Activity() {
     private fun confirmDeleteChat(conversation: String) {
         AlertDialog.Builder(this)
             .setTitle("Xoá đoạn chat \"$conversation\"?")
-            .setMessage("Không thể hoàn tác. Mở lại đoạn chat trong Messenger thì app lưu lại những tin còn hiện trên màn hình.")
+            .setMessage("Không thể hoàn tác. Mở lại đoạn chat trong ${source.label} thì app lưu lại những tin còn hiện trên màn hình.")
             .setPositiveButton("Xoá") { _, _ ->
                 MediaStoreFiles.delete(this, store.deleteConversation(conversation), source)
                 source.avatar(conversation)?.let { AvatarStore.delete(this, it) }

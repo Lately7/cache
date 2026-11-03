@@ -7,6 +7,8 @@ import android.app.job.JobService
 import android.content.ComponentName
 import android.content.ContentValues
 import android.content.Context
+import android.database.sqlite.SQLiteDatabase
+import android.database.sqlite.SQLiteException
 import android.net.Uri
 import android.os.Environment
 import android.provider.MediaStore
@@ -34,15 +36,22 @@ object Backup {
     private const val DB_FOLDER = "db"
     private const val FILES_FOLDER = "files"
     private const val AVATARS = "avatars"
+    private const val ZALO_AVATARS = "avatars-zalo"
     private val lock = Any()
 
-    private fun folders() = Source.entries.map { it.mediaFolder } + AVATARS
+    private fun folders() = Source.entries.map { it.mediaFolder } + AVATARS + ZALO_AVATARS
 
     /** Returns null when nothing changed since the last copy, unless [force] is set. */
     fun run(context: Context, force: Boolean = false): Uri? = synchronized(lock) {
-        val state = Source.entries.joinToString("|") { MessageStore.get(context, it).fingerprint() }
+        // Avatars are in the backup but change no message row, so they need their own part of the check.
+        val pictures = listOf(AVATARS, ZALO_AVATARS).flatMap { File(context.filesDir, it).listFiles().orEmpty().toList() }
+        val state = Source.entries.joinToString("|") { MessageStore.get(context, it).fingerprint() } +
+            "|a:${pictures.size}:${pictures.maxOfOrNull { it.lastModified() } ?: 0L}"
         if (!force && state == Settings.backupState(context)) return null
+        // A fresh install starts empty; backing that up would push the real backups out of the kept five.
+        if (!force && Source.entries.all { MessageStore.get(context, it).isEmpty() }) return null
         val resolver = context.contentResolver
+        removeUnfinished(context)
         val name = PREFIX + SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date()) + ".zip"
         val values = ContentValues().apply {
             put(MediaStore.Downloads.DISPLAY_NAME, name)
@@ -55,9 +64,10 @@ object Backup {
         try {
             val stream = resolver.openOutputStream(uri) ?: throw IOException("không mở được file sao lưu")
             stream.use { write(context, it) }
-        } catch (e: IOException) {
+        } catch (e: Exception) {
+            // Database and provider failures must not leave a hidden half-written file behind either.
             resolver.delete(uri, null, null)
-            throw e
+            throw if (e is IOException) e else IOException(e.message, e)
         }
         values.clear()
         values.put(MediaStore.Downloads.IS_PENDING, 0)
@@ -106,62 +116,110 @@ object Backup {
         zip.closeEntry()
     }
 
+    /** A killed process leaves its pending file hidden in Download; nothing else would ever remove it. */
+    private fun removeUnfinished(context: Context) {
+        val args = android.os.Bundle().apply {
+            putString(android.content.ContentResolver.QUERY_ARG_SQL_SELECTION, "${MediaStore.Downloads.DISPLAY_NAME} LIKE ?")
+            putStringArray(android.content.ContentResolver.QUERY_ARG_SQL_SELECTION_ARGS, arrayOf("$PREFIX%.zip"))
+            putInt(MediaStore.QUERY_ARG_MATCH_PENDING, MediaStore.MATCH_ONLY)
+        }
+        val stale = ArrayList<Long>()
+        context.contentResolver.query(MediaStore.Downloads.EXTERNAL_CONTENT_URI, arrayOf(MediaStore.Downloads._ID), args, null)?.use { c ->
+            while (c.moveToNext()) stale.add(c.getLong(0))
+        }
+        for (id in stale) {
+            context.contentResolver.delete(
+                android.content.ContentUris.withAppendedId(MediaStore.Downloads.EXTERNAL_CONTENT_URI, id),
+                null,
+                null,
+            )
+        }
+    }
+
     private fun prune(context: Context) {
         val resolver = context.contentResolver
-        val old = ArrayList<Long>()
+        val all = ArrayList<Pair<Long, Long>>()
         resolver.query(
             MediaStore.Downloads.EXTERNAL_CONTENT_URI,
-            arrayOf(MediaStore.Downloads._ID),
+            arrayOf(MediaStore.Downloads._ID, MediaStore.Downloads.SIZE),
             "${MediaStore.Downloads.DISPLAY_NAME} LIKE ? AND ${MediaStore.Downloads.RELATIVE_PATH} LIKE ?",
             arrayOf("$PREFIX%.zip", "%$FOLDER%"),
             "${MediaStore.Downloads.DATE_ADDED} DESC",
         )?.use { c ->
-            while (c.moveToNext()) if (c.position >= KEEP) old.add(c.getLong(0))
+            while (c.moveToNext()) all.add(c.getLong(0) to c.getLong(1))
         }
+        // The largest backup is kept whatever its age: after a lost or wiped archive it may be the only full one.
+        val largest = all.maxByOrNull { it.second }?.first
+        val old = all.drop(KEEP).map { it.first }.filter { it != largest }
         for (id in old) {
             resolver.delete(MediaStore.Downloads.EXTERNAL_CONTENT_URI, "${MediaStore.Downloads._ID}=?", arrayOf(id.toString()))
         }
     }
 
-    /** Unpacks fully before touching anything, so a damaged file cannot leave the archive half replaced. */
-    fun restore(context: Context, uri: Uri) = synchronized(lock) {
-        val stage = File(context.cacheDir, "restore").apply { deleteRecursively(); mkdirs() }
+    private fun staged(context: Context) = File(context.filesDir, "restore-ready")
+
+    /**
+     * Unpacks and checks a backup without touching the archive. Open databases cannot be swapped safely,
+     * so the files only replace the archive when the process next starts, before anything opens them.
+     */
+    fun prepareRestore(context: Context, uri: Uri) = synchronized(lock) {
+        val work = File(context.filesDir, "restore-work").apply { deleteRecursively(); mkdirs() }
         try {
             val stream = context.contentResolver.openInputStream(uri) ?: throw IOException("không mở được file")
-            ZipInputStream(stream).use { unpack(it, stage) }
-            val main = File(stage, "$DB_FOLDER/${Source.MESSENGER.database}")
-            if (!isDatabase(main)) throw IOException("đây không phải file sao lưu của app")
-
-            val wasPaused = Settings.isPaused(context)
-            Settings.setPaused(context, true)
-            MessageStore.closeAll()
-            for (source in Source.entries) {
-                val target = context.getDatabasePath(source.database)
-                val incoming = File(stage, "$DB_FOLDER/${source.database}")
-                if (!incoming.exists()) continue
-                File(target.path + "-journal").delete()
-                incoming.copyTo(target, overwrite = true)
-            }
-            for (folder in folders()) {
-                val target = File(context.filesDir, folder)
-                val incoming = File(stage, "$FILES_FOLDER/$folder")
-                target.deleteRecursively()
-                if (incoming.exists()) incoming.copyRecursively(target, overwrite = true)
-            }
-            AvatarStore.forgetCache()
-            Settings.setPaused(context, wasPaused)
-            Diagnostics.trace(context, "Đã khôi phục từ bản sao lưu")
+            ZipInputStream(stream).use { unpack(it, work) }
+            for (source in Source.entries) checkDatabase(File(work, "$DB_FOLDER/${source.database}"))
+            // Every folder is present in the stage, so applying it twice after a crash changes nothing.
+            for (folder in folders()) File(work, "$FILES_FOLDER/$folder").mkdirs()
+            val ready = staged(context)
+            ready.deleteRecursively()
+            if (!work.renameTo(ready)) throw IOException("không chuẩn bị được bản khôi phục")
         } finally {
-            stage.deleteRecursively()
+            work.deleteRecursively()
         }
     }
 
-    private fun isDatabase(file: File): Boolean {
-        if (!file.exists()) return false
-        val head = ByteArray(15)
-        file.inputStream().use { it.read(head) }
-        return String(head, Charsets.US_ASCII) == "SQLite format 3"
+    private fun checkDatabase(file: File) {
+        if (!file.exists()) throw IOException("file sao lưu thiếu ${file.name}")
+        try {
+            SQLiteDatabase.openDatabase(file.path, null, SQLiteDatabase.OPEN_READONLY).use { db ->
+                val ok = db.rawQuery("PRAGMA quick_check", null).use { it.moveToFirst() && it.getString(0) == "ok" }
+                if (!ok) throw IOException("file sao lưu bị hỏng")
+                if (db.version > MessageStore.VERSION) throw IOException("file sao lưu của bản app mới hơn, hãy cập nhật app trước")
+            }
+        } catch (e: SQLiteException) {
+            throw IOException("đây không phải file sao lưu của app", e)
+        }
     }
+
+    /** Called from Application.onCreate, which runs before any service or screen can open a database. */
+    fun applyPendingRestore(context: Context) {
+        // Left by a restore that was killed while unpacking; nothing can be using it at process start.
+        File(context.filesDir, "restore-work").deleteRecursively()
+        val ready = staged(context)
+        if (!ready.exists()) return
+        // Each part is moved out of the stage only once it is in place, so a run killed halfway is finished
+        // by the next one without redoing, or undoing, what the first already moved.
+        for (source in Source.entries) {
+            val incoming = File(ready, "$DB_FOLDER/${source.database}")
+            if (!incoming.exists()) continue
+            val target = context.getDatabasePath(source.database)
+            target.parentFile?.mkdirs()
+            for (suffix in listOf("-journal", "-wal", "-shm")) File(target.path + suffix).delete()
+            target.delete()
+            if (!incoming.renameTo(target)) return
+        }
+        for (folder in folders()) {
+            val incoming = File(ready, "$FILES_FOLDER/$folder")
+            if (!incoming.exists()) continue
+            val target = File(context.filesDir, folder)
+            target.deleteRecursively()
+            if (!incoming.renameTo(target)) return
+        }
+        ready.deleteRecursively()
+        Diagnostics.trace(context, "Đã khôi phục từ bản sao lưu")
+    }
+
+    fun restorePending(context: Context) = staged(context).exists()
 
     /** Only names this app writes are accepted; anything else in the file is ignored, never followed. */
     private fun unpack(zip: ZipInputStream, stage: File) {

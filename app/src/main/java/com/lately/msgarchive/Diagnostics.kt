@@ -12,7 +12,8 @@ import java.util.Date
 object Diagnostics {
     private const val ERROR_FILE = "last-error.txt"
     private const val DUMP_FILE = "screen-dump.txt"
-    private const val MAX_TEXT = 60
+    private const val MAX_TEXT = 120
+    private const val MAX_DUMP_LINES = 800
     private const val TRACE_FILE = "capture-log.txt"
     private const val MAX_TRACE_LINES = 200
     private val traceLock = Any()
@@ -45,20 +46,37 @@ object Diagnostics {
     fun lastError(context: Context) = File(context.filesDir, ERROR_FILE).takeIf { it.exists() }?.readText()
 
     /** Messenger's labels for photos and files are unknown until seen; text is cut short to limit what is copied. */
-    fun writeDump(context: Context, nodes: List<ScreenNode>) {
-        val lines = nodes.joinToString("\n") {
-            "${it.className.substringAfterLast('.')}|${it.left},${it.top},${it.right},${it.bottom}|" +
-                "${if (it.editable) "edit" else ""}${if (it.visible) "" else "hidden"}|${it.text.take(MAX_TEXT).replace('\n', ' ')}"
-        }
-        File(context.filesDir, DUMP_FILE).writeText(lines)
+    private val dumpLock = Any()
+
+    fun clearDump(context: Context) = synchronized(dumpLock) {
+        File(context.filesDir, DUMP_FILE).delete()
     }
 
-    fun lastDump(context: Context) = File(context.filesDir, DUMP_FILE).takeIf { it.exists() }?.readText()
+    /** Collects what scrolls past, because one screen rarely holds every kind of bubble. */
+    fun addToDump(context: Context, nodes: List<ScreenNode>) = synchronized(dumpLock) {
+        try {
+            val file = File(context.filesDir, DUMP_FILE)
+            val known = if (file.exists()) file.readLines() else emptyList()
+            val fresh = nodes.map {
+                val flags = (if (it.editable) "edit " else "") + (if (it.visible) "" else "hidden ") + (if (it.clickable) "click" else "")
+                "${it.className.substringAfterLast('.')}|${it.right - it.left}x${it.bottom - it.top}@${it.left}|$flags|" +
+                    it.text.take(MAX_TEXT).replace('\n', ' ')
+            }.distinct().filterNot { it in known }
+            if (fresh.isNotEmpty()) file.writeText((known + fresh).takeLast(MAX_DUMP_LINES).joinToString("\n"))
+        } catch (_: IOException) {
+            // A diagnostic dump must never stop capture.
+        }
+    }
+
+    fun lastDump(context: Context) = synchronized(dumpLock) {
+        File(context.filesDir, DUMP_FILE).takeIf { it.exists() }?.readText()
+    }
 }
 
 class App : Application() {
     override fun onCreate() {
         super.onCreate()
+        Backup.applyPendingRestore(this)
         if (Settings.firstRunWithCheckedAvatars(this)) AvatarStore.deleteAll(this)
         Backup.schedule(this)
         val previous = Thread.getDefaultUncaughtExceptionHandler()

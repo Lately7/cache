@@ -39,7 +39,9 @@ lại Trợ năng để app nhận quyền chụp màn hình.
 
 ## Sao lưu
 
-App tự sao lưu mỗi 6 giờ nếu có tin mới, vào `Download/LuuTinBackup`, giữ 5 bản mới nhất. Mỗi bản là
+App tự sao lưu mỗi 6 giờ nếu có tin mới, vào `Download/LuuTinBackup`, giữ 5 bản mới nhất và luôn giữ
+bản lớn nhất; kho trống thì không sao lưu. Khôi phục kiểm tra file trước, rồi app tự đóng và thay dữ
+liệu ở lần mở sau, nên không bao giờ thay một nửa. Mỗi bản là
 một file zip gồm cơ sở dữ liệu, JSON, ảnh và avatar của cả hai chế độ, không mã hoá, nên đừng chia sẻ
 file này. Android có thể dời lịch khi tiết kiệm pin. ⚙ > Sao lưu ngay chạy tức thì, ⚙ > Khôi phục từ
 bản sao lưu thay toàn bộ dữ liệu hiện có. Thư mục này vẫn còn sau khi gỡ app.
@@ -48,13 +50,17 @@ bản sao lưu thay toàn bộ dữ liệu hiện có. Thư mục này vẫn cò
 
 Tab Link và tệp liệt kê mọi tin có đường dẫn hoặc tệp; chạm để mở link, nhấn giữ để vào đoạn chat.
 Messenger và Zalo không cho app khác biết địa chỉ tải tệp, nên app chỉ tự lưu được tệp khi thông báo
-có kèm tệp. Còn lại app lưu tên tệp, không có nội dung tệp.
+có kèm tệp. Còn lại app lưu tên tệp, không có nội dung tệp. Ảnh trong Messenger ("Sent photo message")
+được cắt từ màn hình với chất lượng bằng ảnh đang hiển thị.
 
 ## Zalo
 
 Tin Zalo được lưu từ thông báo và từ màn hình khi mở đoạn chat. Zalo không cho biết ai gửi tin, nên
-app đo bong bóng lệch trái hay phải trên ảnh chụp màn hình rồi bỏ ảnh, không lưu lại. Trong nhóm, tên
-người gửi có thể nằm lẫn ở đầu nội dung tin. Ảnh Zalo mới chỉ được ghi nhận là có ảnh, chưa lưu hình.
+app đo bong bóng lệch trái hay phải trên ảnh chụp màn hình rồi bỏ ảnh chụp, không lưu lại. Giờ gửi lấy
+từ dòng ngày của Zalo ("11:40 28/10/2026", "12:38 Today"). Ảnh, nhãn dán và video được cắt hình từ
+màn hình; tệp ("[File] tên 1.2 MB") được ghi nhận kèm tên và dung lượng. Trong nhóm, tên người gửi
+được tách khi Zalo vẽ avatar cạnh tin; tin không có avatar mang tên người gửi của tin ngay trên.
+Thông báo "Nhật ký" và các thông báo không phải tin nhắn của Zalo, Messenger được bỏ qua.
 
 ## Khi không lưu được tin
 

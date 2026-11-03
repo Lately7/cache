@@ -98,7 +98,7 @@ class ConversationActivity : Activity() {
 
     private fun attachmentLabel(message: Message) = when (message.kind) {
         ChatParser.KIND_VIDEO -> "▶ Video: chỉ lưu được ảnh xem trước"
-        ChatParser.KIND_IMAGE -> if (message.media == null) "Ảnh: chưa chụp được" else null
+        ChatParser.KIND_IMAGE -> if (message.media == null) "${message.body}: chưa chụp được hình" else null
         ChatParser.KIND_FILE -> "📎 ${message.body}"
         else -> message.body
     }

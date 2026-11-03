@@ -11,6 +11,8 @@ data class ScreenNode(
     val className: String = "",
     val visible: Boolean = true,
     val clickable: Boolean = false,
+    /** For list views only: whether it can still scroll up. Null for everything else. */
+    val canScrollUp: Boolean? = null,
 )
 
 data class ScreenMessage(
@@ -19,6 +21,7 @@ data class ScreenMessage(
     val previousText: String,
     val sender: String? = null,
     val kind: String? = null,
+    val sentAt: Long? = null,
 )
 
 /** A bubble with an attachment, plus where it is on screen so its picture can be cropped. */
@@ -37,9 +40,23 @@ data class ScreenChat(
 data class MarkedBubble(val sender: String, val text: String)
 
 /** Zalo exposes each message as a full-width row, so its side can only be measured on a screenshot. */
-data class ZaloRow(val text: String, val node: ScreenNode, val kind: String?)
+data class ZaloRow(
+    val text: String,
+    val node: ScreenNode,
+    val kind: String?,
+    val day: String? = null,
+    val clock: String? = null,
+    val sender: String? = null,
+)
 
-data class ZaloScreen(val title: String, val rows: List<ZaloRow>)
+/** A Zalo attachment row: "[Photo]", "[File] name 1.2 MB", with a group member's name in front. */
+data class ZaloTag(val sender: String?, val kind: String?, val body: String)
+
+/** A Zalo row with the date line above it and the time and receipt after it taken off the message. */
+data class ZaloText(val body: String, val day: String?, val clock: String?)
+
+/** [coveredAbove]: a row above the first kept one was hidden, so the top kept row is not the chat's first. */
+data class ZaloScreen(val title: String, val rows: List<ZaloRow>, val coveredAbove: Boolean = false)
 
 /**
  * Turns a flat node list into chat messages. Kept free of Android types so it can be
@@ -89,7 +106,28 @@ object ChatParser {
     private const val AVATAR_MIN_DETAIL = 24
     private const val SAME_FACE_GAP = 40
     private const val MIN_BUBBLE_SHARE = 0.07
-    private val ZALO_TIME = Regex("""\s*\d{1,2}:\d{2}$""")
+    private val ATTACHMENT_LABEL = Regex(
+        """^(sent |received |you sent )?(a |an )?(photo|video|gif|sticker|voice|audio|file|attachment)s?( message)?$""",
+        RegexOption.IGNORE_CASE,
+    )
+    private const val MAX_NAME = 40
+    private val ZALO_TAG = Regex(
+        """^(.*?)\[(photo|image|ảnh|hình ảnh|album|sticker|gif|video|file|tệp|voice|audio|location|contact|card|link)]\s*(.*)$""",
+        setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL),
+    )
+    private val ZALO_DATE = Regex("""(\d{2})/(\d{2})/(\d{4})""")
+    // Only Zalo's own rendering of a date line, seen on a real phone: "11:40 28/10/2026", "12:38 Today".
+    // Anything looser cuts the start off messages people type, such as "8:00 thứ hai nhé".
+    private val ZALO_HEAD = Regex("""^(\d{2}:\d{2}) (\d{2}/\d{2}/\d{4}|Today|Yesterday|Hôm nay|Hôm qua)(?=\s|$)""")
+    private val ZALO_RECEIPT_TAIL = Regex(
+        """(?:^|\s)\d{1,2}:\d{2}\s+(?:seen|sent|received|delivered|đã xem|đã gửi|đã nhận|đang gửi)$""",
+        RegexOption.IGNORE_CASE,
+    )
+    private const val AVATAR_COLUMN = 0.08
+    private val ZALO_TAIL = Regex(
+        """(?:^|\s)(\d{1,2}:\d{2})(?:\s+(?:seen|sent|received|delivered|đã xem|đã gửi|đã nhận|đang gửi))?$""",
+        RegexOption.IGNORE_CASE,
+    )
     private val LINK = Regex(
         """https?://\S+|www\.\S+|\b[\w-]+(\.[\w-]+)*\.(com|net|org|vn|io|me|co|gg|tv|dev|app)\b(/\S*)?""",
         RegexOption.IGNORE_CASE,
@@ -137,20 +175,97 @@ object ChatParser {
         val full = { node: ScreenNode -> node.left <= width * 0.02 && node.right >= width * 0.98 }
         // The pinned message floats over the list and hides whatever row is behind it.
         val covers = nodes.filter { it.className.endsWith("FrameLayout") && !it.editable && it.text.isNotBlank() }
-        val rows = nodes
+        val candidates = nodes
             .filter { it.className.endsWith("ViewGroup") && full(it) && it.top >= header.bottom && it.bottom <= composer.top }
-            .filterNot { row -> covers.any { it.top < row.bottom && it.bottom > row.top } }
+        val uncovered = candidates.filterNot { row -> covers.any { it.top < row.bottom && it.bottom > row.top } }
+        val rows = uncovered
             .sortedBy { it.top }
             .mapNotNull { node ->
-                val text = node.text.replace(ZALO_TIME, "").trim()
+                val clean = cleanZalo(node.text)
+                val tag = zaloTag(clean.body)
                 val tall = node.bottom - node.top >= width * 0.2
                 when {
-                    text.isNotEmpty() -> ZaloRow(text, node, mediaKind(text, node, width))
-                    tall -> ZaloRow("Ảnh", node, KIND_IMAGE)
+                    tag != null -> ZaloRow(tag.body, node, tag.kind, clean.day, clean.clock, tag.sender)
+                    clean.body.isNotEmpty() ->
+                        ZaloRow(clean.body, node, mediaKind(clean.body, node, width), clean.day, clean.clock)
+                    tall -> ZaloRow("Ảnh", node, KIND_IMAGE, clean.day, clean.clock)
                     else -> null
                 }
             }
-        return ZaloScreen(title, rows)
+        return ZaloScreen(title, rows, uncovered.size < candidates.size)
+    }
+
+    /**
+     * For text that 0.5.1 and 0.5.2 already stored: they removed a bare trailing clock themselves, so a
+     * clock still at the end was typed by someone. Only the date line and a receipt are taken off, and a
+     * row that was nothing but those was a picture.
+     */
+    fun cleanStoredZalo(stored: String): String {
+        var body = stored.trim()
+        ZALO_HEAD.find(body)?.let { body = body.substring(it.range.last + 1).trim() }
+        ZALO_RECEIPT_TAIL.find(body)?.let { body = body.substring(0, it.range.first).trim() }
+        return if (body.isEmpty() && stored.isNotBlank()) "Ảnh" else body
+    }
+
+    /** Reads Zalo's bracketed attachment marker; anything before it is the sender's name in a group. */
+    fun zaloTag(body: String): ZaloTag? {
+        val match = ZALO_TAG.find(body) ?: return null
+        val name = match.groupValues[1].trim().takeIf { it.isNotEmpty() && it.length <= MAX_NAME }
+        if (match.groupValues[1].isNotBlank() && name == null) return null
+        val tag = match.groupValues[2].lowercase()
+        val rest = match.groupValues[3].trim()
+        val (kind, label) = when (tag) {
+            "photo", "image", "ảnh", "hình ảnh", "album" -> KIND_IMAGE to "Ảnh"
+            "sticker" -> KIND_IMAGE to "Nhãn dán"
+            "gif" -> KIND_IMAGE to "GIF"
+            "video" -> KIND_VIDEO to "Video"
+            "file", "tệp" -> KIND_FILE to "Tệp"
+            "voice", "audio" -> null to "Tin nhắn thoại"
+            "location" -> null to "Vị trí"
+            "contact", "card" -> null to "Danh thiếp"
+            "link" -> null to "Liên kết"
+            else -> null to match.groupValues[2]
+        }
+        return ZaloTag(name, kind, if (rest.isEmpty()) label else rest)
+    }
+
+    fun cleanZalo(raw: String): ZaloText {
+        var body = raw.trim()
+        val head = ZALO_HEAD.find(body)
+        val day = head?.groupValues?.get(2)
+        if (head != null) body = body.substring(head.range.last + 1).trim()
+        val tail = ZALO_TAIL.find(body)
+        val clock = tail?.groupValues?.get(1) ?: head?.groupValues?.get(1)
+        if (tail != null) body = body.substring(0, tail.range.first).trim()
+        return ZaloText(body, day, clock)
+    }
+
+    /** Send time from a date line and a clock; a weekday alone cannot be pinned down, so it gives null. */
+    fun zaloTime(day: String, clock: String, now: Long): Long? {
+        val at = java.util.Calendar.getInstance().apply { timeInMillis = now }
+        val full = ZALO_DATE.matchEntire(day)
+        when {
+            full != null -> {
+                at.isLenient = false
+                at.set(full.groupValues[3].toInt(), full.groupValues[2].toInt() - 1, full.groupValues[1].toInt())
+            }
+            day.equals("hôm nay", ignoreCase = true) || day.equals("today", ignoreCase = true) -> Unit
+            day.equals("hôm qua", ignoreCase = true) || day.equals("yesterday", ignoreCase = true) ->
+                at.add(java.util.Calendar.DAY_OF_MONTH, -1)
+            else -> return null
+        }
+        val (hour, minute) = clock.split(':').map { it.toInt() }
+        if (hour > 23 || minute > 59) return null
+        at.set(java.util.Calendar.HOUR_OF_DAY, hour)
+        at.set(java.util.Calendar.MINUTE, minute)
+        at.set(java.util.Calendar.SECOND, 0)
+        at.set(java.util.Calendar.MILLISECOND, 0)
+        // A strict calendar rejects dates like 31/02 instead of rolling them into the next month.
+        return try {
+            at.timeInMillis
+        } catch (_: IllegalArgumentException) {
+            null
+        }
     }
 
     /** True for the owner's message, false for someone else's, null for a centred system line. */
@@ -162,16 +277,77 @@ object ChatParser {
     }
 
     /** The top row has no predecessor yet, as in Messenger, so its identity waits until it has one. */
-    fun zaloChat(title: String, rows: List<ZaloRow>, sides: List<Boolean?>): ScreenChat {
-        val kept = rows.indices.mapNotNull { i -> sides[i]?.let { rows[i] to it } }
+    /**
+     * The very first message of a chat has nothing above it, so it would never be saved. A list that
+     * cannot scroll up shows the start of the chat, and there the top bubble is safe to keep.
+     */
+    fun atChatStart(nodes: List<ScreenNode>, anchor: ScreenNode?): Boolean {
+        if (anchor == null) return false
+        // Only the visible list that holds the bubbles counts; a chat kept alive behind this one has its own.
+        val list = nodes
+            .filter { it.canScrollUp != null && it.visible }
+            .filter { it.left <= anchor.left && it.right >= anchor.right && it.top <= anchor.top + 1 && it.bottom >= anchor.top }
+            .maxByOrNull { (it.right - it.left) * (it.bottom - it.top) }
+        return list?.canScrollUp == false
+    }
+
+    fun zaloChat(
+        title: String,
+        rows: List<ZaloRow>,
+        sides: List<Boolean?>,
+        now: Long = 0L,
+        atStart: Boolean = false,
+        members: Set<String> = emptySet(),
+        spans: List<IntRange?> = emptyList(),
+    ): ScreenChat {
+        // A date line applies to every row below it, and a row with no clock shares its neighbour's minute.
+        var day: String? = null
+        var clock: String? = null
+        val times = rows.map { row ->
+            day = row.day ?: day
+            clock = row.clock ?: clock
+            val date = day
+            val time = clock
+            if (date != null && time != null) zaloTime(date, time, now) else null
+        }
+        // A group shows a member's name before the first message of their run; learned names split it off.
+        val names = members + rows.mapNotNull { it.sender }
+        var speaker: String? = null
+        val kept = rows.indices.mapNotNull { i ->
+            val outgoing = sides[i] ?: return@mapNotNull null
+            var row = rows[i]
+            if (outgoing) {
+                speaker = null
+            } else {
+                // Zalo prints a name only on the first message of a run, the one drawn beside the avatar.
+                // Elsewhere a name at the start is just how the message begins ("An ơi ...").
+                val span = spans.getOrNull(i)
+                val withAvatar = span != null && span.first - row.node.left < (row.node.right - row.node.left) * AVATAR_COLUMN
+                val typed = if (withAvatar) names.filter { row.text.startsWith("$it ") }.maxByOrNull { it.length } else null
+                val named = row.sender ?: typed
+                if (typed != null && row.sender == null) row = row.copy(text = row.text.removePrefix(typed).trim())
+                speaker = if (named != null) named else if (withAvatar) null else speaker
+                row = row.copy(sender = speaker)
+            }
+            Triple(row, outgoing, i)
+        }
         var repeats = 0
-        val messages = kept.drop(1).mapIndexed { i, (row, outgoing) ->
-            val previous = kept[i].first.text
+        val shown = if (atStart) kept else kept.drop(1)
+        val offset = kept.size - shown.size
+        val media = ArrayList<ScreenMedia>()
+        val messages = shown.mapIndexed { i, (row, outgoing, index) ->
+            val previous = if (i + offset == 0) "" else kept[i + offset - 1].first.text
             repeats = if (row.text == previous) repeats + 1 else 0
             val before = if (repeats > 1) "$previous\u0002$repeats" else previous
-            ScreenMessage(row.text, outgoing, before, if (outgoing) null else title, row.kind)
+            val message = ScreenMessage(row.text, outgoing, before, if (outgoing) null else row.sender ?: title, row.kind, times[index])
+            val span = spans.getOrNull(index)
+            if (span != null && (row.kind == KIND_IMAGE || row.kind == KIND_VIDEO)) {
+                // Only the bubble's own width, so the crop holds the picture rather than the whole row.
+                media.add(ScreenMedia(message, row.node.copy(left = span.first, right = span.last)))
+            }
+            message
         }
-        return ScreenChat(title, messages)
+        return ScreenChat(title, messages, media = media)
     }
 
     /** Mean colour distance between two same-size avatar samples; a person's picture stays close to itself. */
@@ -185,7 +361,9 @@ object ChatParser {
      * can be tapped, and unlike reaction chips they are at least as tall as a line of text in a bubble.
      */
     private fun isUnlabelledBubble(node: ScreenNode, width: Int) =
-        node.clickable && node.bottom - node.top >= width * MIN_BUBBLE_SHARE && !isNoise(node.text)
+        node.clickable && node.bottom - node.top >= width * MIN_BUBBLE_SHARE &&
+            // "Sent photo message" starts like the "Sent" status line but is the picture itself.
+            (ATTACHMENT_LABEL.containsMatchIn(node.text) || !isNoise(node.text))
 
     private fun contains(outer: ScreenNode, inner: ScreenNode) = inner !== outer &&
         inner.left >= outer.left && inner.right <= outer.right && inner.top >= outer.top && inner.bottom <= outer.bottom
@@ -271,7 +449,7 @@ object ChatParser {
             }
             // Label first: a sender called "Active" or "Seen" must not look like a status line.
             val marked = parseMarked(node.text)
-            if (marked == null && isNoise(node.text)) continue
+            if (marked == null && isNoise(node.text) && !ATTACHMENT_LABEL.containsMatchIn(node.text)) continue
             if (marked?.text?.isBlank() == true) continue
             // The attachment buttons beside the composer start a little higher than the box itself.
             if (labelled && marked == null && (node.bottom > composerTop || !isUnlabelledBubble(node, width))) continue
@@ -295,14 +473,17 @@ object ChatParser {
 
         // The top bubble has no predecessor yet, so its identity would change on scroll; it is saved once it has one.
         var repeats = 0
-        val messages = ordered.drop(1).mapIndexed { i, message ->
-            val previous = ordered[i].text
+        val start = atChatStart(nodes, orderedNodes.firstOrNull())
+        val kept = if (start) ordered else ordered.drop(1)
+        val offset = ordered.size - kept.size
+        val messages = kept.mapIndexed { i, message ->
+            val previous = if (i + offset == 0) "" else ordered[i + offset - 1].text
             repeats = if (message.text == previous) repeats + 1 else 0
             // "ok, ok, ok" would otherwise give the second and third bubble the same identity.
             message.copy(previousText = if (repeats > 1) "$previous\u0002$repeats" else previous)
         }
         val media = messages.mapIndexedNotNull { i, message ->
-            if (message.kind == KIND_IMAGE || message.kind == KIND_VIDEO) ScreenMedia(message, orderedNodes[i + 1]) else null
+            if (message.kind == KIND_IMAGE || message.kind == KIND_VIDEO) ScreenMedia(message, orderedNodes[i + offset]) else null
         }
         return ScreenChat(title, messages, avatars, media)
     }

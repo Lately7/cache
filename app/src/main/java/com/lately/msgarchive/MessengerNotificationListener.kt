@@ -12,12 +12,21 @@ import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 
 class MessengerNotificationListener : NotificationListenerService() {
+    // Callbacks arrive on the main thread; a write waiting behind a backup snapshot must not freeze the app.
+    private val worker = android.os.HandlerThread("notifications").apply { start() }
+    private val handler = android.os.Handler(worker.looper)
+
+    override fun onDestroy() {
+        worker.quitSafely()
+        super.onDestroy()
+    }
 
     /** Messages that arrived while the process was dead are still in the shade. */
     override fun onListenerConnected() {
         try {
             activeNotifications?.forEach { onNotificationPosted(it) }
         } catch (e: RuntimeException) {
+            // Thrown when the connection drops again before the list arrives.
             Diagnostics.record(this, e)
         }
     }
@@ -30,12 +39,14 @@ class MessengerNotificationListener : NotificationListenerService() {
     override fun onNotificationPosted(sbn: StatusBarNotification) {
         val source = Source.of(sbn.packageName) ?: return
         if (Settings.isPaused(this)) return
-        // Extras are another app's data; a malformed one must not take the listener down.
-        try {
-            handle(sbn, source)
-            Settings.noteNotification(this)
-        } catch (e: RuntimeException) {
-            Diagnostics.record(this, e)
+        handler.post {
+            // Extras are another app's data; a malformed one must not take the listener down.
+            try {
+                handle(sbn, source)
+                Settings.noteNotification(this)
+            } catch (e: RuntimeException) {
+                Diagnostics.record(this, e)
+            }
         }
     }
 
@@ -51,16 +62,23 @@ class MessengerNotificationListener : NotificationListenerService() {
             ?: extras.getCharSequence(Notification.EXTRA_TITLE)?.toString()
             ?: return
 
+        val channel = notification.channelId.orEmpty()
+        val style = if (styled.isNullOrEmpty()) "thường" else "${styled.size} tin"
+        // Zalo marks its feed and story alerts as messages too; they come titled with the app's own name
+        // or on a social channel, and are not anyone's chat.
+        val notChat = title.equals(source.label, ignoreCase = true) || NOT_CHAT_CHANNEL.containsMatchIn(channel)
+        if (notChat || (styled.isNullOrEmpty() && notification.category != Notification.CATEGORY_MESSAGE)) {
+            Diagnostics.trace(this, "${source.label} bỏ qua thông báo không phải tin nhắn (kênh $channel)")
+            return
+        }
+
         val store = MessageStore.get(this, source)
         val conversation = store.threadForNotification(title, notification.shortcutId)
         saveAvatar(source.avatar(conversation), notification.getLargeIcon())
         val threadId = if (notification.shortcutId == null) "không có mã" else "có mã"
-        val style = if (styled.isNullOrEmpty()) "thường" else "${styled.size} tin"
-        Diagnostics.trace(this, "${source.label} thông báo $title ($threadId, $style, ${notification.category}): vào $conversation")
+        Diagnostics.trace(this, "${source.label} thông báo $title ($threadId, $style, kênh $channel): vào $conversation")
 
         if (styled.isNullOrEmpty()) {
-            // Without message data this may be a missed call or an app prompt rather than a chat.
-            if (notification.category != Notification.CATEGORY_MESSAGE) return
             val text = extras.getCharSequence(Notification.EXTRA_TEXT)?.toString() ?: return
             // Zalo re-posts a notification to update it, and "when" stays the same while postTime does not.
             val time = notification.`when`.takeIf { it > 0 } ?: sbn.postTime
@@ -112,6 +130,10 @@ class MessengerNotificationListener : NotificationListenerService() {
         val key = ChatParser.notificationKey(conversation, sender, time, text)
         val added = store.insert(message, key)
         if (added && uri != null) store.idForKey(key)?.let { MediaStoreFiles.copy(this, it, uri, source, type) }
+    }
+
+    private companion object {
+        val NOT_CHAT_CHANNEL = Regex("social|story|feed|timeline|moment|update|promo", RegexOption.IGNORE_CASE)
     }
 
     @Suppress("DEPRECATION")

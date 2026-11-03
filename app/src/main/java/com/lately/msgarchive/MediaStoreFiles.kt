@@ -72,7 +72,8 @@ object MediaStoreFiles {
 
     /** Decoded for a phone screen; a full-size copy would exhaust memory while scrolling a chat. */
     fun load(context: Context, name: String, source: Source, maxSide: Int = MAX_SIDE): Bitmap? {
-        val path = File(folder(context, source), name).path
+        // Names come from the archive, which a restored file could have crafted; only the last part is used.
+        val path = File(folder(context, source), File(name).name).path
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeFile(path, bounds)
         var sample = 1
@@ -81,7 +82,7 @@ object MediaStoreFiles {
     }
 
     fun delete(context: Context, names: List<String>, source: Source) {
-        names.forEach { File(folder(context, source), it).delete() }
+        names.forEach { File(folder(context, source), File(it).name).delete() }
     }
 
     fun deleteAll(context: Context, source: Source) {
